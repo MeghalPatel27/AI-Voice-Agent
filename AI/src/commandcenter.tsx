@@ -7,7 +7,6 @@ import {
   Clock3,
   Flame,
   IndianRupee,
-  MessageCircle,
   Phone,
   RefreshCw,
   ShieldAlert,
@@ -16,7 +15,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
-import { Industry, useAuth } from "./auth/AuthContext";
+import { useAuth, type Industry } from "./auth/AuthContext";
 
 type PaymentMetric = {
   connected: boolean;
@@ -170,18 +169,40 @@ export default function CommandCenter() {
   }
 
   useEffect(() => {
-    loadSummary();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setError("");
+        const data = await apiFetch<DashboardSummary>("/api/dashboard/summary");
+        if (cancelled) return;
+        setSummary(data);
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Failed to load dashboard"
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  const liveAiCalls = summary?.liveAiCalls ?? 0;
+
   useEffect(() => {
-    if (!summary || summary.liveAiCalls <= 0) return;
+    if (liveAiCalls <= 0) return;
 
     const timer = window.setInterval(() => {
       void loadSummary({ silent: true });
     }, 4000);
 
     return () => window.clearInterval(timer);
-  }, [summary?.liveAiCalls]);
+  }, [liveAiCalls]);
 
   const metrics = useMemo<MetricCard[]>(() => {
     if (!summary) return [];

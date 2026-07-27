@@ -1,0 +1,289 @@
+import "dotenv/config";
+import { getHumeConfig } from "../src/integrations/hume/hume.config";
+import {
+  REQUIRED_HUME_TOOLS,
+  TOOLS_TO_SCHEMA_CORRECT,
+  TOOL_DESCRIPTIONS,
+  buildCanonicalHumeParameters,
+  buildCanonicalHumeParametersString,
+  parseRemoteToolParameters,
+  schemasEquivalent,
+  validateRemoteToolSchemas,
+} from "../src/integrations/hume/humeToolSchemas";
+
+type RemoteTool = {
+  id: string;
+  name: string;
+  version: number;
+  description?: string | null;
+  parameters?: string;
+};
+
+function env(name: string) {
+  return String(process.env[name] || "").trim();
+}
+
+function extractVersions(payload: any) {
+  return Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.configs_page)
+      ? payload.configs_page
+      : Array.isArray(payload?.versions)
+        ? payload.versions
+        : [];
+}
+
+async function humeRequest(path: string, options: { method?: string; body?: unknown } = {}) {
+  const config = getHumeConfig();
+  const response = await fetch(`${config.apiBaseUrl.replace(/\/$/, "")}${path}`, {
+    method: options.method || "GET",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-Hume-Api-Key": config.apiKey,
+    },
+    body: options.body == null ? undefined : JSON.stringify(options.body),
+  });
+  const text = await response.text();
+  let payload: unknown = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+  }
+  if (!response.ok) {
+    throw new Error(`hume_request_failed:${path}:${response.status}:${String(text).slice(0, 200)}`);
+  }
+  return payload;
+}
+
+async function fetchLatestConfigVersion(configId: string) {
+  const versionsPayload = (await humeRequest(`/v0/evi/configs/${configId}`)) as any;
+  const versions = extractVersions(versionsPayload);
+  if (!versions.length) throw new Error("hume_config_versions_empty");
+  const versionNum = versions[0].version ?? 0;
+  return humeRequest(`/v0/evi/configs/${configId}/version/${versionNum}`) as Promise<any>;
+}
+
+function redactParameters(parameters: unknown) {
+  return parameters;
+}
+
+async function listAllTools(): Promise<RemoteTool[]> {
+  const payload = (await humeRequest("/v0/evi/tools")) as any;
+  const page = Array.isArray(payload?.tools_page) ? payload.tools_page : [];
+  return page.map((tool: any) => ({
+    id: tool.id,
+    name: tool.name,
+    version: tool.version,
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
+}
+
+function buildConfigVersionBody(remote: any, toolSpecs: Array<{ id: string; version: number }>) {
+  const prompt = remote?.prompt;
+  const voice = remote?.voice;
+  const languageModel = remote?.language_model;
+  const ellmModel = remote?.ellm_model;
+  const webhooks = remote?.webhooks || [];
+  const builtinTools = (remote?.builtin_tools || []).map((tool: any) => ({
+    name: tool?.name,
+    fallback_content: tool?.fallback_content ?? null,
+  }));
+
+  return {
+    evi_version: String(remote?.evi_version || "3"),
+    version_description: "Attach corrected AiraDesk tool schemas",
+    prompt: prompt?.id
+      ? {
+          id: prompt.id,
+          version: prompt.version ?? 0,
+          prompt_expansion: prompt.prompt_expansion ?? undefined,
+        }
+      : undefined,
+    voice: voice?.name
+      ? {
+          name: voice.name,
+          provider: voice.provider || "HUME_AI",
+        }
+      : voice?.id
+        ? {
+            id: voice.id,
+            provider: voice.provider || "HUME_AI",
+          }
+        : undefined,
+    language_model: languageModel
+      ? {
+          model_provider: languageModel.model_provider,
+          model_resource: languageModel.model_resource,
+          temperature: languageModel.temperature ?? null,
+        }
+      : undefined,
+    ellm_model: ellmModel
+      ? {
+          allow_short_responses: ellmModel.allow_short_responses ?? null,
+        }
+      : undefined,
+    event_messages: remote?.event_messages ?? undefined,
+    timeouts: remote?.timeouts ?? undefined,
+    nudges: remote?.nudges ?? undefined,
+    turn_detection: remote?.turn_detection ?? undefined,
+    interruption: remote?.interruption ?? undefined,
+    webhooks: webhooks.map((webhook: any) => ({
+      url: webhook.url,
+      events: webhook.events,
+    })),
+    builtin_tools: builtinTools,
+    tools: toolSpecs,
+  };
+}
+
+async function main() {
+  const apply = process.argv.includes("--apply");
+  const config = getHumeConfig();
+  if (!config.apiKey || !config.configId) {
+    console.log(JSON.stringify({ status: "failed", missingEnv: ["HUME_API_KEY", "HUME_CONFIG_ID"] }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+
+  const remote = await fetchLatestConfigVersion(config.configId);
+  const configVersionBefore = remote?.version ?? null;
+  const attachedTools = (remote?.tools || []) as RemoteTool[];
+  const allTools = await listAllTools();
+
+  const duplicateNames = allTools
+    .map((tool) => tool.name)
+    .filter((name, index, arr) => arr.indexOf(name) !== index);
+  if (duplicateNames.length) {
+    throw new Error(`duplicate_tool_names:${[...new Set(duplicateNames)].join(",")}`);
+  }
+
+  const diffs: Array<{
+    name: string;
+    id: string;
+    versionBefore: number;
+    action: "create_tool_version" | "unchanged";
+    before: unknown;
+    after: unknown;
+  }> = [];
+
+  const updatedToolVersions = new Map<string, number>();
+
+  for (const toolName of REQUIRED_HUME_TOOLS) {
+    const attached = attachedTools.find((tool) => tool.name === toolName);
+    if (!attached?.id) {
+      throw new Error(`attached_tool_missing:${toolName}`);
+    }
+
+    const before = parseRemoteToolParameters(attached);
+    const after = buildCanonicalHumeParameters(toolName);
+    const needsUpdate =
+      TOOLS_TO_SCHEMA_CORRECT.includes(toolName as (typeof TOOLS_TO_SCHEMA_CORRECT)[number]) &&
+      !schemasEquivalent(toolName, attached);
+
+    diffs.push({
+      name: toolName,
+      id: attached.id,
+      versionBefore: attached.version,
+      action: needsUpdate ? "create_tool_version" : "unchanged",
+      before: redactParameters(before),
+      after: redactParameters(after),
+    });
+
+    updatedToolVersions.set(attached.id, attached.version);
+  }
+
+  const dryRunReport = {
+    mode: apply ? "apply" : "dry-run",
+    configId: config.configId,
+    configName: remote?.name ?? null,
+    configVersionBefore,
+    duplicateToolNames: duplicateNames,
+    toolDiffs: diffs,
+    configVersionBodyPreview: buildConfigVersionBody(
+      remote,
+      attachedTools.map((tool) => ({
+        id: tool.id,
+        version: updatedToolVersions.get(tool.id) ?? tool.version,
+      })),
+    ),
+  };
+
+  if (!apply) {
+    console.log(JSON.stringify(dryRunReport, null, 2));
+    return;
+  }
+
+  for (const diff of diffs) {
+    if (diff.action !== "create_tool_version") continue;
+    const created = (await humeRequest(`/v0/evi/tools/${diff.id}`, {
+      method: "POST",
+      body: {
+        parameters: buildCanonicalHumeParametersString(diff.name),
+        description: TOOL_DESCRIPTIONS[diff.name] || "",
+        version_description: "Align parameters with AiraDesk backend Zod validators",
+      },
+    })) as RemoteTool;
+    updatedToolVersions.set(diff.id, created.version);
+    diff.versionBefore = created.version - 1;
+  }
+
+  const configBody = buildConfigVersionBody(
+    remote,
+    attachedTools.map((tool) => ({
+      id: tool.id,
+      version: updatedToolVersions.get(tool.id) ?? tool.version,
+    })),
+  );
+
+  const createdConfig = (await humeRequest(`/v0/evi/configs/${config.configId}`, {
+    method: "POST",
+    body: configBody,
+  })) as any;
+
+  const refreshed = await fetchLatestConfigVersion(config.configId);
+  const applyReport = {
+    status: "applied",
+    configId: config.configId,
+    configIdChanged: false,
+    configVersionBefore,
+    configVersionAfter: createdConfig?.version ?? refreshed?.version ?? null,
+    promptPreserved: Boolean(configBody.prompt?.id),
+    voicePreserved: configBody.voice?.name === "Kora" || configBody.voice?.name === remote?.voice?.name,
+    languageModelPreserved:
+      configBody.language_model?.model_resource === remote?.language_model?.model_resource,
+    webhookPreserved: Array.isArray(configBody.webhooks) && configBody.webhooks.length > 0,
+    hangupPreserved: (configBody.builtin_tools || []).some((tool: any) => tool.name === "hang_up"),
+    toolVersions: attachedTools.map((tool) => ({
+      name: tool.name,
+      id: tool.id,
+      versionBefore: diffs.find((item) => item.id === tool.id)?.versionBefore ?? tool.version,
+      versionAfter: updatedToolVersions.get(tool.id) ?? tool.version,
+    })),
+    toolSchemaIssues: validateRemoteToolSchemas(refreshed?.tools || []),
+  };
+
+  console.log(JSON.stringify(applyReport, null, 2));
+
+  if (applyReport.toolSchemaIssues.length > 0) {
+    process.exitCode = 1;
+  }
+}
+
+void main().catch((error) => {
+  console.error(
+    JSON.stringify(
+      {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exitCode = 1;
+});

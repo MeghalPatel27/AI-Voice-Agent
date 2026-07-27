@@ -8,6 +8,13 @@ import { deliverOutboundMessageById } from "../services/outboundDelivery.service
 
 const priorityOptions = ["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const;
 
+function asOptionalString(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
 const whatsappInboundSchema = z.object({
   customerName: z.string().optional(),
   customerPhone: z.string().min(3),
@@ -50,9 +57,10 @@ type CompanyContext = {
     industry: any;
   };
   settings: {
-    businessHours?: string | null;
-    handoverRules?: string | null;
+    businessHours?: unknown;
+    handoverRules?: unknown;
     aiTone?: string | null;
+    [key: string]: unknown;
   };
 };
 
@@ -415,8 +423,8 @@ async function processWhatsAppInboundMessage(input: ProcessWhatsAppInput) {
     companyName: company.name,
     agentName: activeAgent?.name,
     agentInstructions: activeAgent?.instructions,
-    handoverRules: settings.handoverRules,
-    businessHours: settings.businessHours,
+    handoverRules: asOptionalString(settings.handoverRules),
+    businessHours: asOptionalString(settings.businessHours),
     aiTone: settings.aiTone,
     knowledgeBase,
   });
@@ -459,7 +467,7 @@ async function processWhatsAppInboundMessage(input: ProcessWhatsAppInput) {
         intent: finalIntent,
         priority: finalPriority,
         humanNeeded: finalHumanNeeded,
-        businessHours: settings.businessHours,
+        businessHours: asOptionalString(settings.businessHours),
         aiTone: settings.aiTone,
         agentName: activeAgent?.name,
         agentInstructions: activeAgent?.instructions,
@@ -827,8 +835,8 @@ export async function callInbound(req: Request, res: Response) {
       companyName: company.name,
       agentName: activeAgent?.name,
       agentInstructions: activeAgent?.instructions,
-      handoverRules: settings.handoverRules,
-      businessHours: settings.businessHours,
+      handoverRules: asOptionalString(settings.handoverRules),
+      businessHours: asOptionalString(settings.businessHours),
       aiTone: settings.aiTone,
       knowledgeBase,
     });
@@ -871,7 +879,7 @@ export async function callInbound(req: Request, res: Response) {
           intent: finalIntent,
           priority: finalPriority,
           humanNeeded: finalHumanNeeded,
-          businessHours: settings.businessHours,
+          businessHours: asOptionalString(settings.businessHours),
           aiTone: settings.aiTone,
           agentName: activeAgent?.name,
           agentInstructions: activeAgent?.instructions,
@@ -1075,7 +1083,10 @@ export async function getPendingOutboundForProvider(
   }
 }
 
-export async function updateOutboundFromProvider(req: Request, res: Response) {
+export async function updateOutboundFromProvider(
+  req: Request<Record<string, string>>,
+  res: Response,
+) {
   try {
     const verified = await verifyWebhook(req);
 

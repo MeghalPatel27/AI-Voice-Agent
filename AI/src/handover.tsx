@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -230,7 +230,35 @@ export default function HandoverPage() {
   }
 
   useEffect(() => {
-    loadHandoverQueue();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setLoading(true);
+        setError("");
+
+        const data = await apiFetch<HandoverResponse>("/api/handover");
+        if (cancelled) return;
+
+        setConversations(data.conversations);
+        setSummary(data.summary);
+
+        if (data.conversations[0]) {
+          setSelectedId(data.conversations[0].id);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Failed to load handover queue"
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (

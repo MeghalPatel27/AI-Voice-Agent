@@ -3,6 +3,8 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { prisma } from "../db/prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
+import { getHumeSyncWorkerState } from "../integrations/hume/humeSyncWorker.service";
+import { isTwilioWebhookValidationConfigured } from "../integrations/twilio/twilioWebhookValidation.service";
 
 const days = [
   "Monday",
@@ -270,17 +272,8 @@ function getPublicWebhookUrl() {
 }
 
 function getRealtimeWebSocketUrl(publicUrl: string) {
-  if (!publicUrl) return "";
-
-  if (publicUrl.startsWith("https://")) {
-    return publicUrl.replace("https://", "wss://") + "/api/voice/twilio/realtime";
-  }
-
-  if (publicUrl.startsWith("http://")) {
-    return publicUrl.replace("http://", "ws://") + "/api/voice/twilio/realtime";
-  }
-
-  return `wss://${publicUrl}/api/voice/twilio/realtime`;
+  void publicUrl;
+  return "";
 }
 
 function buildVoiceRuntimeStatus(settings: any) {
@@ -294,49 +287,40 @@ function buildVoiceRuntimeStatus(settings: any) {
     settings?.voiceFromNumber ||
     "";
 
-  const openAiKey = envValue("OPENAI_API_KEY");
-  const realtimeModel =
-    envValue("OPENAI_REALTIME_MODEL") || "gpt-realtime-2.1-mini";
-  const elevenLabsKey = envValue("ELEVENLABS_API_KEY");
-  const ttsProviderRaw = envValue("VOICE_TTS_PROVIDER").toLowerCase();
-  const hasElevenLabsKey = hasRealValue(elevenLabsKey);
-  const ttsProvider =
-    ttsProviderRaw === "openai"
-      ? "openai"
-      : ttsProviderRaw === "elevenlabs" || hasElevenLabsKey
-        ? "elevenlabs"
-        : "openai";
+  const humeApiKey = envValue("HUME_API_KEY");
+  const humeConfigId = envValue("HUME_CONFIG_ID");
+  const humeSigningKey = envValue("HUME_WEBHOOK_SIGNING_KEY");
+  const humeWebhookPublicUrl = envValue("HUME_WEBHOOK_PUBLIC_URL") || publicUrl;
 
   const hasTwilio =
     hasRealValue(accountSid) && hasRealValue(authToken) && hasRealValue(phoneNumber);
 
-  const hasRealtime = hasTwilio && hasRealValue(openAiKey) && hasRealValue(publicUrl);
+  const hasHume =
+    hasTwilio &&
+    hasRealValue(humeApiKey) &&
+    hasRealValue(humeConfigId) &&
+    hasRealValue(humeSigningKey) &&
+    hasRealValue(humeWebhookPublicUrl);
 
   const webhookUrl = publicUrl
-    ? `${publicUrl}/api/voice/twilio/incoming`
+    ? `${publicUrl}/api/webhooks/hume/evi`
     : "";
 
-  const status = hasRealtime ? "CONNECTED" : hasTwilio ? "TESTING" : "NOT_CONNECTED";
+  const status = hasHume ? "CONNECTED" : hasTwilio ? "TESTING" : "NOT_CONNECTED";
 
-  const aiVoiceAgentLabel = hasRealtime
-    ? ttsProvider === "elevenlabs" && hasElevenLabsKey
-      ? `OpenAI Realtime (${realtimeModel}) + ElevenLabs ${
-          envValue("ELEVENLABS_TTS_TRANSPORT").toLowerCase() === "http"
-            ? "HTTP TTS"
-            : "WS TTS"
-        }`
-      : `OpenAI Realtime: ${realtimeModel}`
+  const aiVoiceAgentLabel = hasHume
+    ? `Hume EVI (${humeConfigId})`
     : hasTwilio
-      ? "Twilio connected, OpenAI realtime not ready"
+      ? "Twilio connected, Hume EVI not fully configured"
       : "";
 
   return {
-    connected: hasRealtime,
+    connected: hasHume,
     hasTwilio,
-    hasRealtime,
+    hasHume,
     channelSettings: {
       status,
-      mode: hasRealtime ? "LIVE" : hasTwilio ? "TESTING" : "DEMO",
+      mode: hasHume ? "LIVE" : hasTwilio ? "TESTING" : "DEMO",
       provider: hasTwilio ? "twilio" : "",
       businessPhoneNumber: phoneNumber,
       aiVoiceAgent: aiVoiceAgentLabel,
@@ -345,11 +329,11 @@ function buildVoiceRuntimeStatus(settings: any) {
       recordingEnabled: true,
       transcriptionEnabled: true,
       missedCallCallbackEnabled: true,
-      realtimeEnabled: hasRealtime,
+      realtimeEnabled: false,
       businessHoursBehavior: "AI_ANSWERS_AND_TRANSFERS_WHEN_NEEDED",
       afterHoursBehavior: "TAKE_MESSAGE_AND_SCHEDULE_CALLBACK",
       webhookUrl,
-      websocketUrl: getRealtimeWebSocketUrl(publicUrl),
+      websocketUrl: "",
       webhookStatus: hasRealValue(publicUrl) ? "CONNECTED" : "NOT_CONNECTED",
       accountSidMasked: maskSecret(accountSid),
       authTokenMasked: maskSecret(authToken),
@@ -358,27 +342,20 @@ function buildVoiceRuntimeStatus(settings: any) {
     connection: {
       provider: "twilio",
       channel: "AI_CALL" as const,
-      status: hasRealtime ? "LIVE" : hasTwilio ? "TESTING" : "NOT_CONNECTED",
+      status: hasHume ? "LIVE" : hasTwilio ? "TESTING" : "NOT_CONNECTED",
       displayName: "Twilio Voice",
       accountId: hasRealValue(accountSid) ? accountSid : null,
       phoneNumber: hasRealValue(phoneNumber) ? phoneNumber : null,
       webhookUrl,
-      mode: hasRealtime ? "REALTIME" : hasTwilio ? "TESTING" : "DEMO",
+      mode: hasHume ? "HUME_EVI" : hasTwilio ? "TESTING" : "DEMO",
       metadata: {
-        realtimeEnabled: hasRealtime,
+        realtimeEnabled: false,
         twilioReady: hasTwilio,
-        openAiReady: hasRealValue(openAiKey),
-        elevenLabsReady: hasElevenLabsKey,
-        ttsProvider,
-        ttsTransport:
-          ttsProvider === "elevenlabs"
-            ? envValue("ELEVENLABS_TTS_TRANSPORT").toLowerCase() === "http"
-              ? "http"
-              : "websocket"
-            : "openai",
+        humeReady: hasHume,
+        humeConfigIdPresent: hasRealValue(humeConfigId),
+        humeWebhookSigningPresent: hasRealValue(humeSigningKey),
         publicWebhookReady: hasRealValue(publicUrl),
-        websocketUrl: getRealtimeWebSocketUrl(publicUrl),
-        realtimeModel,
+        humeWebhookUrl: webhookUrl,
         accountSidMasked: maskSecret(accountSid),
       },
     },
@@ -803,6 +780,49 @@ function buildSetupHealth({
   };
 }
 
+export async function getProviderHealth(req: AuthRequest, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const voiceRuntime = buildVoiceRuntimeStatus(
+      await ensureSettings(req.user.companyId),
+    );
+    const humeSyncWorker = getHumeSyncWorkerState();
+
+    return res.json({
+      voice: {
+        connected: voiceRuntime.connected,
+        hasTwilio: voiceRuntime.hasTwilio,
+        hasHume: voiceRuntime.hasHume,
+        status: voiceRuntime.connection.status,
+        mode: voiceRuntime.connection.mode,
+        twilioWebhookValidationConfigured: isTwilioWebhookValidationConfigured(),
+      },
+      humeSyncWorker: {
+        ...humeSyncWorker,
+        readiness:
+          !humeSyncWorker.enabled
+            ? "disabled"
+            : humeSyncWorker.healthy
+              ? "healthy"
+              : humeSyncWorker.paused
+                ? "paused"
+                : "degraded",
+      },
+      postCallAnalysisWorker: {
+        enabled: process.env.POST_CALL_ANALYSIS_WORKER_ENABLED !== "false",
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to read provider health",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export async function getSettingsControlRoom(req: AuthRequest, res: Response) {
   try {
     if (!req.user) {
@@ -1131,11 +1151,13 @@ export async function updateChannelSettings(req: AuthRequest, res: Response) {
 
     const channel = req.params.channel;
 
-    if (!["whatsapp", "calls", "websiteChat", "email"].includes(channel)) {
+    if (!channel || !["whatsapp", "calls", "websiteChat", "email"].includes(channel)) {
       return res.status(400).json({
         message: "Invalid channel",
       });
     }
+
+    const channelKey = channel as keyof typeof defaultChannelSettings;
 
     const result = channelSchema.safeParse(req.body);
 
@@ -1151,8 +1173,8 @@ export async function updateChannelSettings(req: AuthRequest, res: Response) {
 
     const next = {
       ...current,
-      [channel]: {
-        ...asObject((current as any)[channel]),
+      [channelKey]: {
+        ...asObject((current as any)[channelKey]),
         ...result.data.settings,
       },
     };
@@ -1201,13 +1223,21 @@ export async function testChannel(req: AuthRequest, res: Response) {
     }
 
     const channel = req.params.channel;
+
+    if (!channel || !["whatsapp", "calls", "websiteChat", "email"].includes(channel)) {
+      return res.status(400).json({
+        message: "Invalid channel",
+      });
+    }
+
+    const channelKey = channel as keyof typeof defaultChannelSettings;
     const settings = await syncRuntimeIntegrations(
       req.user.companyId,
       await ensureSettings(req.user.companyId)
     );
 
     const channelSettings = asObject(settings.channelSettings, defaultChannelSettings);
-    const selectedChannel = asObject((channelSettings as any)[channel]);
+    const selectedChannel = asObject((channelSettings as any)[channelKey]);
 
     await audit(req, "TEST", "CHANNEL", `${channel} test requested`, undefined, {
       channel,
@@ -1223,8 +1253,8 @@ export async function testChannel(req: AuthRequest, res: Response) {
             : "WhatsApp is not connected yet. Add Meta Cloud API credentials and webhook."
           : channel === "calls"
             ? selectedChannel.status === "CONNECTED"
-              ? "Twilio realtime voice is connected."
-              : "Calls are not fully connected yet. Check Twilio, OpenAI and PUBLIC_WEBHOOK_URL."
+              ? "Twilio + Hume EVI voice is connected."
+              : "Calls are not fully connected yet. Check Twilio, HUME_* and PUBLIC_WEBHOOK_URL."
             : "Test completed.",
       settings: selectedChannel,
     });

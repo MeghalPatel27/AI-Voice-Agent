@@ -1,17 +1,15 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import {
   AlertTriangle,
   Bot,
   Building2,
   CheckCircle2,
-  Clock3,
   CreditCard,
   Database,
   Edit3,
   KeyRound,
   Loader2,
   MessageCircle,
-  Phone,
   Plus,
   RefreshCw,
   Save,
@@ -102,6 +100,16 @@ type AuditLog = {
   createdAt: string;
 };
 
+type BusinessHourRow = {
+  day: string;
+  open: boolean;
+  from: string;
+  to: string;
+};
+
+type SettingsRecord = Record<string, unknown>;
+type IntegrationSettings = Record<string, unknown>;
+
 type IntegrationConnection = {
   id?: string;
   provider: string;
@@ -115,7 +123,7 @@ type IntegrationConnection = {
   lastCheckedAt?: string | null;
   lastEventAt?: string | null;
   lastError?: string | null;
-  metadata?: Record<string, any> | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 type SettingsResponse = {
@@ -123,7 +131,7 @@ type SettingsResponse = {
     id: string;
     name: string;
   };
-  settings: Record<string, any>;
+  settings: SettingsRecord;
   teamMembers: TeamMember[];
   knowledgeItems: KnowledgeItem[];
   crmStages: CrmStage[];
@@ -142,7 +150,7 @@ type SettingsResponse = {
       description: string;
     }[];
   };
-  integrations: Record<string, any>;
+  integrations: Record<string, IntegrationSettings>;
   billing: {
     status: string;
     message: string;
@@ -313,13 +321,65 @@ function splitList(value: string) {
     .filter(Boolean);
 }
 
-function joinList(value: any) {
+function joinList(value: unknown) {
   if (!Array.isArray(value)) return "";
-  return value.join("\n");
+  return value.map(String).join("\n");
 }
 
-function normalizeBusinessHours(value: any) {
-  if (Array.isArray(value)) return value;
+function settingString(
+  record: Record<string, unknown>,
+  key: string,
+  fallback = ""
+): string {
+  const value = record[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+function settingNumber(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: number
+): number {
+  const value = record[key];
+  return typeof value === "number" ? value : fallback;
+}
+
+function settingBoolean(
+  record: Record<string, unknown>,
+  key: string,
+  fallback = false
+): boolean {
+  const value = record[key];
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function nestedSettings(
+  record: Record<string, unknown>,
+  key: string
+): Record<string, unknown> {
+  const value = record[key];
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  return {};
+}
+
+function integrationConnection(
+  settings: IntegrationSettings
+): IntegrationConnection | null {
+  const value = settings.connection;
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as IntegrationConnection;
+  }
+
+  return null;
+}
+
+function normalizeBusinessHours(value: unknown): BusinessHourRow[] {
+  if (Array.isArray(value)) {
+    return value as BusinessHourRow[];
+  }
 
   return days.map((day) => ({
     day,
@@ -345,6 +405,7 @@ function priorityTone(priority: string) {
 export default function SettingsPage() {
   const [activeSection, setActiveSection] = useState<Section>("COMPANY");
   const [data, setData] = useState<SettingsResponse | null>(null);
+  const [dataVersion, setDataVersion] = useState(0);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState("");
@@ -361,6 +422,7 @@ export default function SettingsPage() {
       );
 
       setData(response);
+      setDataVersion((version) => version + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load settings");
     } finally {
@@ -389,7 +451,30 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
-    loadSettings();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setError("");
+        const response = await apiFetch<SettingsResponse>(
+          "/api/settings/control-room"
+        );
+        if (cancelled) return;
+        setData(response);
+        setDataVersion((version) => version + 1);
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Failed to load settings"
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading && !data) {
@@ -536,11 +621,17 @@ export default function SettingsPage() {
           <IntegrationStatusStrip data={data} />
 
           {activeSection === "COMPANY" ? (
-            <CompanySection data={data} saving={saving} onSave={runSave} />
+            <CompanySection
+              key={dataVersion}
+              data={data}
+              saving={saving}
+              onSave={runSave}
+            />
           ) : null}
 
           {activeSection === "TEAM" ? (
             <TeamPermissionsSection
+              key={dataVersion}
               data={data}
               saving={saving}
               onSave={runSave}
@@ -548,19 +639,35 @@ export default function SettingsPage() {
           ) : null}
 
           {activeSection === "CHANNELS" ? (
-            <ChannelsSection data={data} saving={saving} onSave={runSave} />
+            <ChannelsSection
+              key={dataVersion}
+              data={data}
+              saving={saving}
+              onSave={runSave}
+            />
           ) : null}
 
           {activeSection === "AI" ? (
-            <AiSetupSection data={data} saving={saving} onSave={runSave} />
+            <AiSetupSection
+              key={dataVersion}
+              data={data}
+              saving={saving}
+              onSave={runSave}
+            />
           ) : null}
 
           {activeSection === "CRM" ? (
-            <CrmWorkflowSection data={data} saving={saving} onSave={runSave} />
+            <CrmWorkflowSection
+              key={dataVersion}
+              data={data}
+              saving={saving}
+              onSave={runSave}
+            />
           ) : null}
 
           {activeSection === "NOTIFICATIONS" ? (
             <NotificationsSection
+              key={dataVersion}
               data={data}
               saving={saving}
               onSave={runSave}
@@ -570,7 +677,12 @@ export default function SettingsPage() {
           {activeSection === "BILLING" ? <BillingSection data={data} /> : null}
 
           {activeSection === "SECURITY" ? (
-            <SecuritySection data={data} saving={saving} onSave={runSave} />
+            <SecuritySection
+              key={dataVersion}
+              data={data}
+              saving={saving}
+              onSave={runSave}
+            />
           ) : null}
         </main>
       </div>
@@ -579,38 +691,45 @@ export default function SettingsPage() {
 }
 
 function IntegrationStatusStrip({ data }: { data: SettingsResponse }) {
+  const whatsapp = data.integrations.whatsapp || {};
+  const calls = data.integrations.calls || {};
+  const websiteChat = data.integrations.websiteChat || {};
+  const email = data.integrations.email || {};
+  const payment = data.integrations.payment || {};
+
   const integrations = [
     {
       label: "WhatsApp",
-      status: data.integrations.whatsapp?.status,
-      mode: data.integrations.whatsapp?.mode,
-      detail: data.integrations.whatsapp?.businessNumber || "Meta Cloud API",
+      status: settingString(whatsapp, "status"),
+      mode: settingString(whatsapp, "mode"),
+      detail:
+        settingString(whatsapp, "businessNumber") || "Meta Cloud API",
     },
     {
       label: "Calls",
-      status: data.integrations.calls?.status,
-      mode: data.integrations.calls?.mode,
+      status: settingString(calls, "status"),
+      mode: settingString(calls, "mode"),
       detail:
-        data.integrations.calls?.businessPhoneNumber ||
-        data.integrations.calls?.provider ||
+        settingString(calls, "businessPhoneNumber") ||
+        settingString(calls, "provider") ||
         "Twilio Realtime",
     },
     {
       label: "Website",
-      status: data.integrations.websiteChat?.status,
-      mode: data.integrations.websiteChat?.mode,
+      status: settingString(websiteChat, "status"),
+      mode: settingString(websiteChat, "mode"),
       detail: "Website widget",
     },
     {
       label: "Email",
-      status: data.integrations.email?.status,
-      mode: data.integrations.email?.mode,
-      detail: data.integrations.email?.fromEmail || "Email channel",
+      status: settingString(email, "status"),
+      mode: settingString(email, "mode"),
+      detail: settingString(email, "fromEmail") || "Email channel",
     },
     {
       label: "Payment",
-      status: data.integrations.payment?.status,
-      mode: data.integrations.payment?.mode,
+      status: settingString(payment, "status"),
+      mode: settingString(payment, "mode"),
       detail: "Manual billing",
     },
   ];
@@ -664,58 +783,45 @@ function CompanySection({
   const settings = data.settings;
 
   const [companyName, setCompanyName] = useState(data.company.name || "");
-  const [businessType, setBusinessType] = useState(settings.businessType || "");
-  const [address, setAddress] = useState(settings.address || "");
-  const [city, setCity] = useState(settings.city || "");
-  const [country, setCountry] = useState(settings.country || "India");
-  const [timezone, setTimezone] = useState(settings.timezone || "Asia/Kolkata");
+  const [businessType, setBusinessType] = useState(
+    settingString(settings, "businessType")
+  );
+  const [address, setAddress] = useState(settingString(settings, "address"));
+  const [city, setCity] = useState(settingString(settings, "city"));
+  const [country, setCountry] = useState(
+    settingString(settings, "country", "India")
+  );
+  const [timezone, setTimezone] = useState(
+    settingString(settings, "timezone", "Asia/Kolkata")
+  );
   const [defaultLanguage, setDefaultLanguage] = useState(
-    settings.defaultLanguage || "English"
+    settingString(settings, "defaultLanguage", "English")
   );
   const [supportedLanguages, setSupportedLanguages] = useState(
     joinList(settings.supportedLanguages) || "English"
   );
-  const [websiteUrl, setWebsiteUrl] = useState(settings.websiteUrl || "");
-  const [brandTone, setBrandTone] = useState(settings.brandTone || "");
+  const [websiteUrl, setWebsiteUrl] = useState(
+    settingString(settings, "websiteUrl")
+  );
+  const [brandTone, setBrandTone] = useState(settingString(settings, "brandTone"));
   const [mainWhatsappNumber, setMainWhatsappNumber] = useState(
-    settings.mainWhatsappNumber || ""
+    settingString(settings, "mainWhatsappNumber")
   );
   const [mainCallNumber, setMainCallNumber] = useState(
-    settings.mainCallNumber || ""
+    settingString(settings, "mainCallNumber")
   );
   const [callForwardingNumber, setCallForwardingNumber] = useState(
-    settings.callForwardingNumber || ""
+    settingString(settings, "callForwardingNumber")
   );
   const [emergencyEscalationNumber, setEmergencyEscalationNumber] = useState(
-    settings.emergencyEscalationNumber || ""
+    settingString(settings, "emergencyEscalationNumber")
   );
   const [closedDays, setClosedDays] = useState(
     Array.isArray(settings.closedDays) ? settings.closedDays.join("\n") : ""
   );
-  const [businessHours, setBusinessHours] = useState(
+  const [businessHours, setBusinessHours] = useState<BusinessHourRow[]>(
     normalizeBusinessHours(settings.businessHours)
   );
-
-  useEffect(() => {
-    setCompanyName(data.company.name || "");
-    setBusinessType(settings.businessType || "");
-    setAddress(settings.address || "");
-    setCity(settings.city || "");
-    setCountry(settings.country || "India");
-    setTimezone(settings.timezone || "Asia/Kolkata");
-    setDefaultLanguage(settings.defaultLanguage || "English");
-    setSupportedLanguages(joinList(settings.supportedLanguages) || "English");
-    setWebsiteUrl(settings.websiteUrl || "");
-    setBrandTone(settings.brandTone || "");
-    setMainWhatsappNumber(settings.mainWhatsappNumber || "");
-    setMainCallNumber(settings.mainCallNumber || "");
-    setCallForwardingNumber(settings.callForwardingNumber || "");
-    setEmergencyEscalationNumber(settings.emergencyEscalationNumber || "");
-    setClosedDays(
-      Array.isArray(settings.closedDays) ? settings.closedDays.join("\n") : ""
-    );
-    setBusinessHours(normalizeBusinessHours(settings.businessHours));
-  }, [data.company.name, settings]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -845,7 +951,7 @@ function CompanySection({
           </p>
 
           <div className="mt-4 space-y-3">
-            {businessHours.map((row: any, index: number) => (
+            {businessHours.map((row, index) => (
               <div
                 key={row.day}
                 className="grid gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 md:grid-cols-[160px_130px_1fr_1fr]"
@@ -945,26 +1051,6 @@ function TeamPermissionsSection({
   });
   const [resetPassword, setResetPassword] = useState("");
 
-  useEffect(() => {
-    if (!selectedMemberId && data.teamMembers[0]) {
-      setSelectedMemberId(data.teamMembers[0].id);
-    }
-  }, [data.teamMembers, selectedMemberId]);
-
-  useEffect(() => {
-    if (!selected) return;
-
-    setRole(selected.role);
-    setDepartment(selected.department || "");
-    setJobTitle(selected.jobTitle || "");
-    setCapacity(selected.workloadCapacity || 8);
-    setPermissions({
-      ...defaultPermissions,
-      ...(selected.permissions || {}),
-    });
-    setResetPassword("");
-  }, [selected?.id]);
-
   async function saveMember(event: FormEvent) {
     event.preventDefault();
     if (!selected) return;
@@ -1056,7 +1142,7 @@ function TeamPermissionsSection({
         </div>
 
         {selected ? (
-          <form onSubmit={saveMember} className="space-y-6">
+          <form key={selectedMemberId} onSubmit={saveMember} className="space-y-6">
             <div className="rounded-[28px] border border-white/10 bg-black/20 p-5">
               <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
                 <div>
@@ -1238,7 +1324,7 @@ function ChannelsSection({
     "whatsapp" | "calls" | "websiteChat" | "email"
   >("whatsapp");
 
-  const [settings, setSettings] = useState<Record<string, any>>(
+  const [settings, setSettings] = useState<IntegrationSettings>(
     data.integrations.whatsapp || {}
   );
 
@@ -1255,47 +1341,63 @@ function ChannelsSection({
   const [whatsappStatus, setWhatsappStatus] = useState("NOT_CONNECTED");
 
   useEffect(() => {
-    setSettings(data.integrations[active] || {});
-  }, [active, data.integrations]);
-
-  useEffect(() => {
     if (active !== "whatsapp") return;
 
     let mounted = true;
 
-    apiFetch<{ config: Record<string, any> }>("/api/whatsapp-integration")
+    apiFetch<{ config: IntegrationSettings }>("/api/whatsapp-integration")
       .then((response) => {
         if (!mounted) return;
 
         const config = response.config || {};
-        setWhatsappProviderMode(config.whatsappProviderMode || "mock");
-        setBusinessWhatsappNumber(config.businessWhatsappNumber || config.mainWhatsappNumber || config.whatsappNumber || "");
-        setWhatsappPhoneNumberId(config.whatsappPhoneNumberId || "");
-        setWhatsappBusinessAccountId(config.whatsappBusinessAccountId || "");
-        setWhatsappGraphApiVersion(config.whatsappGraphApiVersion || "v20.0");
-        setWhatsappWebhookVerifyToken(config.whatsappWebhookVerifyToken || "airadesk_verify_token");
-        setWhatsappAccessTokenSet(Boolean(config.whatsappAccessTokenSet));
-        setWhatsappAccessTokenPreview(config.whatsappAccessTokenPreview || "");
-        setWhatsappWebhookUrl(config.webhookUrl || settings.webhookUrl || "");
-        setWhatsappStatus(config.status || (config.connected ? "CONNECTED" : "NOT_CONNECTED"));
+        const providerMode = settingString(config, "whatsappProviderMode");
+        setWhatsappProviderMode(providerMode === "cloud" ? "cloud" : "mock");
+        setBusinessWhatsappNumber(
+          settingString(config, "businessWhatsappNumber") ||
+            settingString(config, "mainWhatsappNumber") ||
+            settingString(config, "whatsappNumber")
+        );
+        setWhatsappPhoneNumberId(settingString(config, "whatsappPhoneNumberId"));
+        setWhatsappBusinessAccountId(
+          settingString(config, "whatsappBusinessAccountId")
+        );
+        setWhatsappGraphApiVersion(
+          settingString(config, "whatsappGraphApiVersion", "v20.0")
+        );
+        setWhatsappWebhookVerifyToken(
+          settingString(config, "whatsappWebhookVerifyToken", "airadesk_verify_token")
+        );
+        setWhatsappAccessTokenSet(settingBoolean(config, "whatsappAccessTokenSet"));
+        setWhatsappAccessTokenPreview(
+          settingString(config, "whatsappAccessTokenPreview")
+        );
+        setWhatsappWebhookUrl(
+          settingString(config, "webhookUrl") ||
+            settingString(settings, "webhookUrl")
+        );
+        setWhatsappStatus(
+          settingString(config, "status") ||
+            (settingBoolean(config, "connected") ? "CONNECTED" : "NOT_CONNECTED")
+        );
         setWhatsappAccessToken("");
       })
       .catch(() => {
         if (!mounted) return;
-        setWhatsappStatus(settings.status || "NOT_CONNECTED");
+        setWhatsappStatus(settingString(settings, "status", "NOT_CONNECTED"));
       });
 
     return () => {
       mounted = false;
     };
-  }, [active, data.integrations, settings.status, settings.webhookUrl]);
+  }, [active, settings]);
 
-  const connection = settings.connection || null;
+  const connection = integrationConnection(settings);
   const isRuntimeChannel = active === "calls" || active === "whatsapp";
+  const channelStatus = settingString(settings, "status");
   const isConnected =
     active === "whatsapp"
       ? whatsappStatus === "CONNECTED" || whatsappStatus === "LIVE"
-      : settings.status === "CONNECTED" || settings.status === "LIVE";
+      : channelStatus === "CONNECTED" || channelStatus === "LIVE";
 
   async function saveChannel() {
     await onSave(`channel-${active}`, async () => {
@@ -1310,7 +1412,7 @@ function ChannelsSection({
 
   async function saveWhatsAppIntegration() {
     await onSave("channel-whatsapp", async () => {
-      const response = await apiFetch<{ config: Record<string, any> }>(
+      const response = await apiFetch<{ config: IntegrationSettings }>(
         "/api/whatsapp-integration",
         {
           method: "PATCH",
@@ -1327,10 +1429,15 @@ function ChannelsSection({
       );
 
       const config = response.config || {};
-      setWhatsappStatus(config.status || (config.connected ? "CONNECTED" : "NOT_CONNECTED"));
-      setWhatsappAccessTokenSet(Boolean(config.whatsappAccessTokenSet));
-      setWhatsappAccessTokenPreview(config.whatsappAccessTokenPreview || "");
-      setWhatsappWebhookUrl(config.webhookUrl || "");
+      setWhatsappStatus(
+        settingString(config, "status") ||
+          (settingBoolean(config, "connected") ? "CONNECTED" : "NOT_CONNECTED")
+      );
+      setWhatsappAccessTokenSet(settingBoolean(config, "whatsappAccessTokenSet"));
+      setWhatsappAccessTokenPreview(
+        settingString(config, "whatsappAccessTokenPreview")
+      );
+      setWhatsappWebhookUrl(settingString(config, "webhookUrl"));
       setWhatsappAccessToken("");
     });
   }
@@ -1380,7 +1487,11 @@ function ChannelsSection({
           ].map(([key, label]) => (
             <button
               key={key}
-              onClick={() => setActive(key as typeof active)}
+              onClick={() => {
+                const next = key as typeof active;
+                setActive(next);
+                setSettings(data.integrations[next] || {});
+              }}
               className={`rounded-full border px-4 py-2 text-sm ${
                 active === key
                   ? "border-white bg-white text-black"
@@ -1406,14 +1517,20 @@ function ChannelsSection({
                         : "Email"}
                 </p>
 
-                <Badge tone={statusTone(active === "whatsapp" ? whatsappStatus : settings.status)}>
-                  {active === "whatsapp" ? whatsappStatus : settings.status || "NOT_CONNECTED"}
+                <Badge
+                  tone={statusTone(
+                    active === "whatsapp" ? whatsappStatus : channelStatus
+                  )}
+                >
+                  {active === "whatsapp"
+                    ? whatsappStatus
+                    : channelStatus || "NOT_CONNECTED"}
                 </Badge>
 
                 {active === "whatsapp" ? (
                   <Badge>{whatsappProviderMode === "cloud" ? "CLOUD API" : "DEMO"}</Badge>
-                ) : settings.mode ? (
-                  <Badge>{settings.mode}</Badge>
+                ) : settingString(settings, "mode") ? (
+                  <Badge>{settingString(settings, "mode")}</Badge>
                 ) : null}
               </div>
 
@@ -1570,7 +1687,9 @@ function ChannelsSection({
 
               <WebhookCopyBox
                 label="Meta WhatsApp webhook URL"
-                value={whatsappWebhookUrl || settings.webhookUrl}
+                value={
+                  whatsappWebhookUrl || settingString(settings, "webhookUrl")
+                }
                 onCopy={copyText}
               />
 
@@ -1634,27 +1753,35 @@ function ChannelsSection({
               <div className="grid gap-4 xl:grid-cols-2">
                 <ReadOnlyInfo
                   label="Provider"
-                  value={settings.provider || connection?.provider || "-"}
+                  value={
+                    settingString(settings, "provider") ||
+                    connection?.provider ||
+                    "-"
+                  }
                 />
 
                 <ReadOnlyInfo
                   label="Business phone number"
-                  value={settings.businessPhoneNumber || connection?.phoneNumber || "-"}
+                  value={
+                    settingString(settings, "businessPhoneNumber") ||
+                    connection?.phoneNumber ||
+                    "-"
+                  }
                 />
 
                 <ReadOnlyInfo
                   label="AI voice agent"
-                  value={settings.aiVoiceAgent || "-"}
+                  value={settingString(settings, "aiVoiceAgent", "-")}
                 />
 
                 <ReadOnlyInfo
                   label="Realtime enabled"
-                  value={settings.realtimeEnabled ? "Yes" : "No"}
+                  value={settingBoolean(settings, "realtimeEnabled") ? "Yes" : "No"}
                 />
 
                 <ReadOnlyInfo
                   label="Webhook status"
-                  value={settings.webhookStatus || "-"}
+                  value={settingString(settings, "webhookStatus", "-")}
                 />
 
                 <ReadOnlyInfo
@@ -1666,13 +1793,13 @@ function ChannelsSection({
               <div className="grid gap-4">
                 <WebhookCopyBox
                   label="Twilio voice webhook URL"
-                  value={settings.webhookUrl}
+                  value={settingString(settings, "webhookUrl")}
                   onCopy={copyText}
                 />
 
                 <WebhookCopyBox
                   label="Realtime WebSocket URL"
-                  value={settings.websocketUrl}
+                  value={settingString(settings, "websocketUrl")}
                   onCopy={copyText}
                 />
               </div>
@@ -1692,7 +1819,7 @@ function ChannelsSection({
             <div className="mt-6 grid gap-4 xl:grid-cols-2">
               <SwitchField
                 label="Widget enabled"
-                value={Boolean(settings.widgetEnabled)}
+                value={settingBoolean(settings, "widgetEnabled")}
                 onChange={(value) =>
                   setSettings({
                     ...settings,
@@ -1703,7 +1830,7 @@ function ChannelsSection({
 
               <Field label="Greeting message">
                 <Input
-                  value={settings.greeting || ""}
+                  value={settingString(settings, "greeting")}
                   onChange={(value) =>
                     setSettings({
                       ...settings,
@@ -1719,7 +1846,7 @@ function ChannelsSection({
             <div className="mt-6 grid gap-4 xl:grid-cols-2">
               <Field label="From email">
                 <Input
-                  value={settings.fromEmail || ""}
+                  value={settingString(settings, "fromEmail")}
                   onChange={(value) =>
                     setSettings({
                       ...settings,
@@ -1731,7 +1858,7 @@ function ChannelsSection({
 
               <Field label="Reply mode">
                 <select
-                  value={settings.replyMode || "DRAFT_ONLY"}
+                  value={settingString(settings, "replyMode", "DRAFT_ONLY")}
                   onChange={(event) =>
                     setSettings({
                       ...settings,
@@ -1805,17 +1932,6 @@ function WebhookCopyBox({
   );
 }
 
-function CodeLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
-      <p className="text-xs text-white/35">{label}</p>
-      <p className="mt-2 break-all font-mono text-xs leading-5 text-white/65">
-        {value}
-      </p>
-    </div>
-  );
-}
-
 function AiSetupSection({
   data,
   saving,
@@ -1882,16 +1998,20 @@ function AiBehaviorPanel({
 }) {
   const settings = data.settings;
 
-  const [aiName, setAiName] = useState(settings.aiName || "AI Assistant");
-  const [aiTone, setAiTone] = useState(settings.aiTone || "Professional");
+  const [aiName, setAiName] = useState(
+    settingString(settings, "aiName", "AI Assistant")
+  );
+  const [aiTone, setAiTone] = useState(
+    settingString(settings, "aiTone", "Professional")
+  );
   const [aiReplyMode, setAiReplyMode] = useState(
-    settings.aiReplyMode || "DRAFT_ONLY"
+    settingString(settings, "aiReplyMode", "DRAFT_ONLY")
   );
   const [aiReplyLength, setAiReplyLength] = useState(
-    settings.aiReplyLength || "MEDIUM"
+    settingString(settings, "aiReplyLength", "MEDIUM")
   );
   const [aiConfidenceThreshold, setAiConfidenceThreshold] = useState(
-    settings.aiConfidenceThreshold || 75
+    settingNumber(settings, "aiConfidenceThreshold", 75)
   );
   const [allowedActions, setAllowedActions] = useState(
     joinList(settings.aiAllowedActions) ||
@@ -1902,27 +2022,8 @@ function AiBehaviorPanel({
       "Cannot give discount\nCannot confirm payment\nCannot make legal claims\nCannot give medical advice\nCannot promise delivery date"
   );
   const [fallbackResponse, setFallbackResponse] = useState(
-    settings.aiFallbackResponse || "Let me connect you with a team member."
+    settingString(settings, "aiFallbackResponse", "Let me connect you with a team member.")
   );
-
-  useEffect(() => {
-    setAiName(settings.aiName || "AI Assistant");
-    setAiTone(settings.aiTone || "Professional");
-    setAiReplyMode(settings.aiReplyMode || "DRAFT_ONLY");
-    setAiReplyLength(settings.aiReplyLength || "MEDIUM");
-    setAiConfidenceThreshold(settings.aiConfidenceThreshold || 75);
-    setAllowedActions(
-      joinList(settings.aiAllowedActions) ||
-        "Answer FAQs\nSend brochure\nBook meeting\nCreate lead\nCreate task\nCollect customer details\nTransfer to human"
-    );
-    setRestrictedActions(
-      joinList(settings.aiRestrictedActions) ||
-        "Cannot give discount\nCannot confirm payment\nCannot make legal claims\nCannot give medical advice\nCannot promise delivery date"
-    );
-    setFallbackResponse(
-      settings.aiFallbackResponse || "Let me connect you with a team member."
-    );
-  }, [settings]);
 
   async function saveAi(event: FormEvent) {
     event.preventDefault();
@@ -2840,41 +2941,28 @@ function TaskWorkflowManager({
   saving: string;
   onSave: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 }) {
-  const current = data.settings.taskWorkflowSettings || {};
+  const current = nestedSettings(data.settings, "taskWorkflowSettings");
   const [managerApprovalRequired, setManagerApprovalRequired] = useState(
-    Boolean(current.managerApprovalRequired)
+    settingBoolean(current, "managerApprovalRequired")
   );
   const [proofRequired, setProofRequired] = useState(
-    Boolean(current.proofRequired)
+    settingBoolean(current, "proofRequired")
   );
   const [overdueReminderHours, setOverdueReminderHours] = useState(
-    current.overdueReminderHours || 24
+    settingNumber(current, "overdueReminderHours", 24)
   );
   const [employeeCanMarkBlocked, setEmployeeCanMarkBlocked] = useState(
-    current.employeeCanMarkBlocked !== false
+    settingBoolean(current, "employeeCanMarkBlocked", true)
   );
   const [employeeCanCompleteTask, setEmployeeCanCompleteTask] = useState(
-    current.employeeCanCompleteTask !== false
+    settingBoolean(current, "employeeCanCompleteTask", true)
   );
-  const [statuses, setStatuses] = useState(
-    Array.isArray(current.statuses)
-      ? current.statuses.join("\n")
-      : "To Do\nIn Progress\nBlocked\nSubmitted\nCompleted\nNeeds Changes"
-  );
-
-  useEffect(() => {
-    const next = data.settings.taskWorkflowSettings || {};
-    setManagerApprovalRequired(Boolean(next.managerApprovalRequired));
-    setProofRequired(Boolean(next.proofRequired));
-    setOverdueReminderHours(next.overdueReminderHours || 24);
-    setEmployeeCanMarkBlocked(next.employeeCanMarkBlocked !== false);
-    setEmployeeCanCompleteTask(next.employeeCanCompleteTask !== false);
-    setStatuses(
-      Array.isArray(next.statuses)
-        ? next.statuses.join("\n")
-        : "To Do\nIn Progress\nBlocked\nSubmitted\nCompleted\nNeeds Changes"
-    );
-  }, [data.settings.taskWorkflowSettings]);
+  const [statuses, setStatuses] = useState(() => {
+    const value = current.statuses;
+    return Array.isArray(value)
+      ? value.map(String).join("\n")
+      : "To Do\nIn Progress\nBlocked\nSubmitted\nCompleted\nNeeds Changes";
+  });
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -2948,7 +3036,6 @@ function TaskWorkflowManager({
 
 function NotificationsSection({
   data,
-  saving,
   onSave,
 }: {
   data: SettingsResponse;
@@ -3194,27 +3281,19 @@ function SecuritySection({
   saving: string;
   onSave: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 }) {
-  const current = data.settings.securitySettings || {};
+  const current = nestedSettings(data.settings, "securitySettings");
   const [twoFactorRequired, setTwoFactorRequired] = useState(
-    Boolean(current.twoFactorRequired)
+    settingBoolean(current, "twoFactorRequired")
   );
   const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState(
-    current.sessionTimeoutMinutes || 1440
+    settingNumber(current, "sessionTimeoutMinutes", 1440)
   );
   const [auditLogsEnabled, setAuditLogsEnabled] = useState(
-    current.auditLogsEnabled !== false
+    settingBoolean(current, "auditLogsEnabled", true)
   );
   const [dataRetentionDays, setDataRetentionDays] = useState(
-    current.dataRetentionDays || 365
+    settingNumber(current, "dataRetentionDays", 365)
   );
-
-  useEffect(() => {
-    const next = data.settings.securitySettings || {};
-    setTwoFactorRequired(Boolean(next.twoFactorRequired));
-    setSessionTimeoutMinutes(next.sessionTimeoutMinutes || 1440);
-    setAuditLogsEnabled(next.auditLogsEnabled !== false);
-    setDataRetentionDays(next.dataRetentionDays || 365);
-  }, [data.settings.securitySettings]);
 
   async function save(event: FormEvent) {
     event.preventDefault();

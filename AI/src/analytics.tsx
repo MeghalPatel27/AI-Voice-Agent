@@ -11,7 +11,6 @@ import {
   Phone,
   RefreshCw,
   ShieldAlert,
-  TrendingUp,
   UsersRound,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
@@ -91,7 +90,29 @@ export default function AnalyticsPage() {
   }
 
   useEffect(() => {
-    loadAnalytics();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setError("");
+        const response = await apiFetch<AnalyticsResponse>(
+          "/api/analytics/overview"
+        );
+        if (cancelled) return;
+        setData(response);
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Failed to load analytics"
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const maxTrendCount = useMemo(() => {

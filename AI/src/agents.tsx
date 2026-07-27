@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -204,7 +204,30 @@ export default function AgentsPage() {
   }
 
   useEffect(() => {
-    loadAgents();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setError("");
+        const data = await apiFetch<AgentsResponse>("/api/agents");
+        if (cancelled) return;
+
+        setAgents(data.agents);
+
+        const nextAgent = data.agents[0] || null;
+        setSelectedAgent(nextAgent);
+        syncEditForm(nextAgent);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load agents");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const stats = useMemo(() => {

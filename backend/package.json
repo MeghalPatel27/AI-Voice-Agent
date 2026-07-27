@@ -3,15 +3,28 @@
   "version": "1.0.0",
   "private": true,
   "license": "ISC",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "dev": "nodemon",
-    "build": "tsc --noEmit",
+    "build": "npm run prisma:generate && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
-    "prisma:migrate:dev": "prisma migrate dev"
+    "prisma:migrate:dev": "prisma migrate dev",
+    "hume:validate-config": "tsx scripts/humeValidateConfig.ts",
+    "hume:configure": "tsx scripts/humeConfigure.ts",
+    "twilio:validate-config": "tsx scripts/twilioValidateConfig.ts",
+    "twilio:verify-webhook": "tsx scripts/verifyTwilioWebhook.ts",
+    "db:audit": "tsx scripts/dbAudit.ts",
+    "db:seed-dev": "tsx scripts/seedDevTenant.ts",
+    "db:init-tenant": "tsx scripts/initDevTenant.ts",
+    "db:rotate-secrets": "tsx scripts/rotateDevSecrets.ts",
+    "db:backfill-hume-metadata": "tsx scripts/backfillHumeMetadata.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
@@ -20,8 +33,10 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "hume": "^0.16.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.22.0",
+    "twilio": "^5.13.1",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
   },

@@ -125,7 +125,6 @@ export async function getAiProviderStatus(req: AuthRequest, res: Response) {
     return res.json({
       connected: !isMissingKey(OPENAI_API_KEY),
       textModel: OPENAI_TEXT_MODEL,
-      realtimeModel: OPENAI_REALTIME_MODEL,
       hasApiKey: !isMissingKey(OPENAI_API_KEY),
     });
   } catch (error) {

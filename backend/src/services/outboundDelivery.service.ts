@@ -2,6 +2,7 @@ import { prisma } from "../db/prisma";
 import { sendWhatsAppTextMessage } from "./whatsappProvider.service";
 
 type DeliverPendingInput = {
+  companyId?: string;
   channel?: "WHATSAPP";
   limit?: number;
 };
@@ -11,14 +12,15 @@ function safeLimit(value?: number) {
   return Math.max(1, Math.min(100, Math.floor(Number(value))));
 }
 
-function normalizeChannel(value?: string) {
-  return value === "WHATSAPP" ? "WHATSAPP" : "WHATSAPP";
+function normalizeChannel(_value?: string) {
+  return "WHATSAPP" as const;
 }
 
-export async function deliverOutboundMessageById(id: string) {
-  const outbound = await prisma.outboundMessage.findUnique({
+export async function deliverOutboundMessageById(id: string, companyId?: string) {
+  const outbound = await prisma.outboundMessage.findFirst({
     where: {
       id,
+      ...(companyId ? { companyId } : {}),
     },
     include: {
       company: {
@@ -114,8 +116,9 @@ export async function deliverPendingOutboundMessages(input: DeliverPendingInput 
 
   const pending = await prisma.outboundMessage.findMany({
     where: {
-      channel,
+      channel: "WHATSAPP",
       status: "PENDING",
+      ...(input.companyId ? { companyId: input.companyId } : {}),
     },
     orderBy: {
       createdAt: "asc",

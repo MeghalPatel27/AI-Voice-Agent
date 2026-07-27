@@ -8,6 +8,7 @@ import {
   deleteHandoffRule,
   deleteKnowledgeItem,
   deleteNotificationRule,
+  getProviderHealth,
   getSettingsControlRoom,
   resetTeamPassword,
   testChannel,
@@ -28,6 +29,7 @@ import { authMiddleware } from "../middleware/auth.middleware";
 const router = Router();
 
 router.get("/control-room", authMiddleware, getSettingsControlRoom);
+router.get("/provider-health", authMiddleware, getProviderHealth);
 
 router.patch("/company", authMiddleware, updateCompanySettings);
 router.patch("/ai-behavior", authMiddleware, updateAiBehavior);

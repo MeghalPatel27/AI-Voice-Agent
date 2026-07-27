@@ -1,25 +1,25 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   AlertTriangle,
   BarChart3,
-  CalendarPlus,
   CheckCircle2,
   Clock3,
-  IndianRupee,
   KanbanSquare,
   Loader2,
-  MessageCircle,
-  Phone,
   Plus,
   RefreshCw,
   Search,
-  Send,
   Sparkles,
   Target,
   Upload,
   UserRound,
-  UsersRound,
-  XCircle,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
 
@@ -304,7 +304,13 @@ export default function CustomersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  async function loadLeads(nextSelectedId?: string) {
+  const selectedIdRef = useRef(selectedId);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  const loadLeads = useCallback(async (nextSelectedId?: string) => {
     try {
       setError("");
       setLoading(true);
@@ -332,7 +338,11 @@ export default function CustomersPage() {
       setTeamMembers(data.teamMembers);
       setModules(data.modules);
 
-      const id = nextSelectedId || selectedId || data.leads[0]?.id || "";
+      const id =
+        nextSelectedId ||
+        selectedIdRef.current ||
+        data.leads[0]?.id ||
+        "";
 
       setSelectedId(id);
 
@@ -346,7 +356,7 @@ export default function CustomersPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [filter, source, owner, view, search]);
 
   async function loadLeadDetail(id: string) {
     try {
@@ -580,11 +590,11 @@ export default function CustomersPage() {
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      loadLeads();
+      void loadLeads();
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [filter, source, owner, view, search]);
+  }, [loadLeads]);
 
   const ownerOptions = useMemo(() => {
     return [

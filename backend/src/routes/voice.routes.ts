@@ -5,28 +5,29 @@ import {
   handleTwilioIncomingCall,
   handleTwilioIncomingRealtimeCall,
   handleTwilioOutboundAnswer,
-  handleTwilioRealtimeConnection,
   handleTwilioRecordingMedia,
   handleTwilioRecordingStatus,
   handleTwilioRepeat,
   handleTwilioSpeech,
   handleTwilioStatus,
-} from "../controllers/voice.controller";
+} from "../controllers/voiceHume.controller";
 import { authMiddleware } from "../middleware/auth.middleware";
+import { createTwilioWebhookMiddleware } from "../integrations/twilio/twilioWebhookValidation.service";
 
 const router = Router();
+const twilioWebhook = createTwilioWebhookMiddleware();
 
-router.post("/twilio/incoming", handleTwilioIncomingRealtimeCall);
-router.post("/twilio/incoming-legacy", handleTwilioIncomingCall);
+router.post("/twilio/incoming", twilioWebhook, handleTwilioIncomingRealtimeCall);
+router.post("/twilio/incoming-legacy", twilioWebhook, handleTwilioIncomingCall);
 
 router.post("/twilio/outbound-ai", authMiddleware, handleStartAiOutboundCall);
-router.post("/twilio/outbound-answer", handleTwilioOutboundAnswer);
+router.post("/twilio/outbound-answer", twilioWebhook, handleTwilioOutboundAnswer);
 
-router.post("/twilio/speech", handleTwilioSpeech);
-router.post("/twilio/repeat", handleTwilioRepeat);
-router.post("/twilio/fallback", handleTwilioFallback);
-router.post("/twilio/status", handleTwilioStatus);
-router.post("/twilio/recording", handleTwilioRecordingStatus);
+router.post("/twilio/speech", twilioWebhook, handleTwilioSpeech);
+router.post("/twilio/repeat", twilioWebhook, handleTwilioRepeat);
+router.post("/twilio/fallback", twilioWebhook, handleTwilioFallback);
+router.post("/twilio/status", twilioWebhook, handleTwilioStatus);
+router.post("/twilio/recording", twilioWebhook, handleTwilioRecordingStatus);
 
 router.get(
   "/twilio/recording/:callId/media",
@@ -34,5 +35,4 @@ router.get(
   handleTwilioRecordingMedia
 );
 
-export { handleTwilioRealtimeConnection };
 export default router;

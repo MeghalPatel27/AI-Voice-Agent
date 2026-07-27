@@ -12,18 +12,41 @@ const bookingStatusSchema = z.enum([
   "NO_SHOW",
 ]);
 
+const bookingAcceptanceStatusSchema = z.enum([
+  "PENDING_ACCEPTANCE",
+  "ACCEPTED",
+  "DECLINED",
+]);
+
+const bookingOutcomeSchema = z.enum(["PENDING", "WON", "LOST", "FOLLOW_UP"]);
+
 const createBookingSchema = z.object({
   customerId: z.string().nullable().optional(),
   conversationId: z.string().nullable().optional(),
+  callId: z.string().nullable().optional(),
   title: z.string().min(1),
   dateTime: z.string().nullable().optional(),
+  timezone: z.string().nullable().optional(),
+  purpose: z.string().nullable().optional(),
   status: bookingStatusSchema.optional(),
+  assignedUserId: z.string().nullable().optional(),
+  notes: z.string().nullable().optional(),
+  nextAction: z.string().nullable().optional(),
+  proposalSent: z.boolean().optional(),
+  outcome: bookingOutcomeSchema.optional(),
 });
 
 const updateBookingSchema = z.object({
   title: z.string().min(1).optional(),
   dateTime: z.string().nullable().optional(),
+  timezone: z.string().nullable().optional(),
+  purpose: z.string().nullable().optional(),
   status: bookingStatusSchema.optional(),
+  assignedUserId: z.string().nullable().optional(),
+  notes: z.string().nullable().optional(),
+  nextAction: z.string().nullable().optional(),
+  proposalSent: z.boolean().optional(),
+  outcome: bookingOutcomeSchema.optional(),
 });
 
 function buildRecordingMediaUrl(call: any) {
@@ -91,6 +114,31 @@ function attachBookingComputedFields<T extends Record<string, any>>(booking: T) 
 function buildBookingIncludes() {
   return {
     customer: true,
+    assignedUser: {
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      },
+    },
+    acceptedBy: {
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      },
+    },
+    call: {
+      select: {
+        id: true,
+        status: true,
+        direction: true,
+        createdAt: true,
+        transcript: true,
+        recordingUrl: true,
+        recordingSid: true,
+      },
+    },
     conversation: {
       include: {
         customer: true,
@@ -287,7 +335,21 @@ export async function createBooking(req: AuthRequest, res: Response) {
     }
 
     const companyId = req.user.companyId;
-    const { customerId, conversationId, title, dateTime, status } = result.data;
+    const {
+      customerId,
+      conversationId,
+      callId,
+      title,
+      dateTime,
+      timezone,
+      purpose,
+      status,
+      assignedUserId,
+      notes,
+      nextAction,
+      proposalSent,
+      outcome,
+    } = result.data;
 
     let conversation:
       | {
@@ -330,17 +392,60 @@ export async function createBooking(req: AuthRequest, res: Response) {
       }
     }
 
+    if (callId) {
+      const call = await prisma.call.findFirst({
+        where: {
+          id: callId,
+          conversation: {
+            companyId,
+          },
+        },
+      });
+
+      if (!call) {
+        return res.status(404).json({
+          message: "Call not found",
+        });
+      }
+    }
+
+    if (assignedUserId) {
+      const assignee = await prisma.user.findFirst({
+        where: {
+          id: assignedUserId,
+          companyId,
+          isActive: true,
+        },
+      });
+
+      if (!assignee) {
+        return res.status(404).json({
+          message: "Assigned user not found",
+        });
+      }
+    }
+
     const booking = await prisma.booking.create({
       data: {
         companyId,
         customerId: customerId || conversation?.customerId || undefined,
         conversationId: conversationId || undefined,
+        callId: callId || undefined,
         title,
         dateTime:
           dateTime === undefined || dateTime === null || dateTime === ""
             ? null
             : new Date(dateTime),
+        timezone: timezone || undefined,
+        purpose: purpose || undefined,
         status: status || "REQUESTED",
+        acceptanceStatus: assignedUserId ? "PENDING_ACCEPTANCE" : "PENDING_ACCEPTANCE",
+        assignedUserId: assignedUserId || undefined,
+        notes: notes || undefined,
+        nextAction: nextAction || undefined,
+        proposalSent: proposalSent ?? false,
+        proposalSentAt: proposalSent ? new Date() : undefined,
+        outcome: outcome || "PENDING",
       },
       include: buildBookingIncludes(),
     });
@@ -406,22 +511,68 @@ export async function updateBooking(req: AuthRequest, res: Response) {
       });
     }
 
-    const { title, dateTime, status } = result.data;
+    const { title, dateTime, timezone, purpose, status, assignedUserId, notes, nextAction, proposalSent, outcome } =
+      result.data;
+
+    const updateData: Prisma.BookingUpdateInput = {
+      title,
+      dateTime:
+        dateTime === undefined
+          ? undefined
+          : dateTime === null || dateTime === ""
+            ? null
+            : new Date(dateTime),
+      timezone: timezone === undefined ? undefined : timezone,
+      purpose: purpose === undefined ? undefined : purpose,
+      status,
+      notes: notes === undefined ? undefined : notes,
+      nextAction: nextAction === undefined ? undefined : nextAction,
+      outcome,
+    };
+
+    if (assignedUserId !== undefined) {
+      if (assignedUserId) {
+        const assignee = await prisma.user.findFirst({
+          where: {
+            id: assignedUserId,
+            companyId: req.user.companyId,
+            isActive: true,
+          },
+        });
+
+        if (!assignee) {
+          return res.status(404).json({
+            message: "Assigned user not found",
+          });
+        }
+      }
+
+      updateData.assignedUser = assignedUserId
+        ? { connect: { id: assignedUserId } }
+        : { disconnect: true };
+      updateData.acceptanceStatus = "PENDING_ACCEPTANCE";
+      updateData.acceptedAt = null;
+      updateData.acceptedBy = { disconnect: true };
+    }
+
+    if (proposalSent !== undefined) {
+      updateData.proposalSent = proposalSent;
+      updateData.proposalSentAt = proposalSent ? new Date() : null;
+    }
+
+    if (status === "CANCELLED") {
+      updateData.cancelledAt = new Date();
+    }
+
+    if (status === "COMPLETED") {
+      updateData.completedAt = new Date();
+    }
 
     const booking = await prisma.booking.update({
       where: {
         id,
       },
-      data: {
-        title,
-        dateTime:
-          dateTime === undefined
-            ? undefined
-            : dateTime === null || dateTime === ""
-              ? null
-              : new Date(dateTime),
-        status,
-      },
+      data: updateData,
       include: buildBookingIncludes(),
     });
 
@@ -467,6 +618,71 @@ export async function updateBooking(req: AuthRequest, res: Response) {
 
     return res.status(500).json({
       message: "Failed to update booking",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+export async function acceptBooking(req: AuthRequest, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        message: "Unauthorized",
+      });
+    }
+
+    const { id } = req.params;
+
+    const booking = await prisma.booking.findFirst({
+      where: {
+        id,
+        companyId: req.user.companyId,
+      },
+    });
+
+    if (!booking) {
+      return res.status(404).json({
+        message: "Booking not found",
+      });
+    }
+
+    if (!booking.assignedUserId) {
+      return res.status(400).json({
+        message: "Booking has no assigned employee to accept",
+      });
+    }
+
+    if (booking.assignedUserId !== req.user.userId) {
+      return res.status(403).json({
+        message: "Only the assigned employee can accept this booking",
+      });
+    }
+
+    if (booking.acceptanceStatus === "ACCEPTED") {
+      return res.status(409).json({
+        message: "Booking already accepted",
+      });
+    }
+
+    const updated = await prisma.booking.update({
+      where: { id },
+      data: {
+        acceptanceStatus: "ACCEPTED",
+        acceptedAt: new Date(),
+        acceptedByUserId: req.user.userId,
+      },
+      include: buildBookingIncludes(),
+    });
+
+    return res.json({
+      message: "Booking accepted",
+      booking: attachBookingComputedFields(updated),
+    });
+  } catch (error) {
+    console.error("Accept booking error:", error);
+
+    return res.status(500).json({
+      message: "Failed to accept booking",
       error: error instanceof Error ? error.message : String(error),
     });
   }

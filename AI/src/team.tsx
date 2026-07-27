@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import {
   AlertTriangle,
@@ -146,27 +146,6 @@ function formatEnum(value?: string | null) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function formatTime(value?: string | null) {
-  if (!value) return "No activity";
-
-  const date = new Date(value);
-  const diff = Date.now() - date.getTime();
-
-  const minutes = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
-
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
-
-  return date.toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-  });
-}
-
 function formatDate(value?: string | null) {
   if (!value) return "No deadline";
 
@@ -249,6 +228,16 @@ export default function TeamPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  function syncEditForm(member: TeamMember | null) {
+    if (!member || member.type !== "USER") return;
+
+    setEditName(member.name);
+    setEditRole(member.role as Role);
+    setEditDepartment(member.department || "");
+    setEditJobTitle(member.jobTitle || "");
+    setEditCapacity(member.workloadCapacity || 8);
+  }
+
   async function loadTeam(nextSelectedId?: string) {
     try {
       setError("");
@@ -273,6 +262,7 @@ export default function TeamPage() {
 
       const found = data.members.find((member) => member.id === nextId) || null;
       setSelectedMember(found);
+      syncEditForm(found);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load team");
     } finally {
@@ -283,6 +273,7 @@ export default function TeamPage() {
   function selectMember(member: TeamMember) {
     setSelectedId(member.id);
     setSelectedMember(member);
+    syncEditForm(member);
   }
 
   async function inviteMember(event: FormEvent) {
@@ -412,18 +403,42 @@ export default function TeamPage() {
   }
 
   useEffect(() => {
-    loadTeam();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setError("");
+        const data = await apiFetch<TeamResponse>("/api/team/overview");
+        if (cancelled) return;
+
+        setSummary(data.summary);
+        setMembers(data.members);
+        setAttentionQueue(data.attentionQueue);
+        setTeamMembers(data.teamMembers);
+
+        const nextId =
+          data.members.find((member) => member.type === "USER" && member.isActive)
+            ?.id ||
+          data.members[0]?.id ||
+          "";
+
+        setSelectedId(nextId);
+
+        const found = data.members.find((member) => member.id === nextId) || null;
+        setSelectedMember(found);
+        syncEditForm(found);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load team");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  useEffect(() => {
-    if (!selectedMember || selectedMember.type !== "USER") return;
-
-    setEditName(selectedMember.name);
-    setEditRole(selectedMember.role as Role);
-    setEditDepartment(selectedMember.department || "");
-    setEditJobTitle(selectedMember.jobTitle || "");
-    setEditCapacity(selectedMember.workloadCapacity || 8);
-  }, [selectedMember]);
 
   const filteredMembers = useMemo(() => {
     return members.filter((member) => {

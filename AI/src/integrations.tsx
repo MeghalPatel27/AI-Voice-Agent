@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   Copy,
   KeyRound,
@@ -304,7 +304,33 @@ export default function IntegrationsPage() {
   }
 
   useEffect(() => {
-    loadIntegrations();
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setError("");
+        const [secretData, whatsappData] = await Promise.all([
+          apiFetch<IntegrationSecretResponse>("/api/integrations/secret"),
+          apiFetch<WhatsAppIntegrationResponse>("/api/whatsapp-integration"),
+        ]);
+        if (cancelled) return;
+
+        setCompanyId(secretData.companyId);
+        setWebhookSecret(secretData.webhookSecret);
+        applyWhatsAppConfig(whatsappData.config);
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Failed to load integrations"
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {

@@ -751,7 +751,10 @@ function buildTeamTaskReport(data: Awaited<ReturnType<typeof loadPeriodData>>) {
     waitingReview: 0,
     employees: employeeRows,
     mostDelayed: mostDelayed?.delayed ? mostDelayed : null,
-    mostOverloaded: mostOverloaded?.workloadPercent > 100 ? mostOverloaded : null,
+    mostOverloaded:
+      mostOverloaded?.workloadPercent != null && mostOverloaded.workloadPercent > 100
+        ? mostOverloaded
+        : null,
     insight:
       data.tasks.length === 0
         ? "No task report yet. Assign tasks to start tracking workload and delays."

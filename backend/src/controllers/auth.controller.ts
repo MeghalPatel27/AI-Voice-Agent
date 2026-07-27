@@ -91,6 +91,12 @@ export async function register(req: Request, res: Response) {
 
     const user = company.users[0];
 
+    if (!user) {
+      return res.status(500).json({
+        message: "Account created but owner user was not provisioned",
+      });
+    }
+
     const token = createToken({
       userId: user.id,
       companyId: company.id,

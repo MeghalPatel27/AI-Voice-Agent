@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma";
 import {
   TERMINAL_CALL_STATUSES,
@@ -237,7 +238,7 @@ async function processClaimedAnalysis(analysisId: string) {
         intentScore: null,
         confidence: 0.2,
         requirementSummary: null,
-        requirementDetails: null,
+        requirementDetails: Prisma.DbNull,
         evidenceSignals: [],
         promptVersion: POST_CALL_PROMPT_VERSION,
         modelName: getPostCallAnalysisModel(),
@@ -279,9 +280,32 @@ async function processClaimedAnalysis(analysisId: string) {
         processingStartedAt: null,
         completedAt: new Date(),
         failureCode: null,
+        failureMessage: null,
         nextAttemptAt: null,
       },
     });
+
+    const call = await prisma.call.findUnique({
+      where: { id: analysis.callId },
+      include: {
+        conversation: {
+          select: {
+            customerId: true,
+          },
+        },
+      },
+    });
+
+    if (call?.conversation.customerId) {
+      await prisma.customer.update({
+        where: { id: call.conversation.customerId },
+        data: {
+          leadScore: result.intentScore,
+          requirementSummary: result.requirementSummary,
+          requirementDetails: result.requirements as Prisma.InputJsonValue,
+        },
+      });
+    }
 
     workerLog("post_call_analysis_completed", {
       analysisId: analysis.id,
@@ -326,8 +350,8 @@ async function processClaimedAnalysis(analysisId: string) {
         intentScore: null,
         confidence: null,
         requirementSummary: null,
-        requirementDetails: null,
-        evidenceSignals: null,
+        requirementDetails: Prisma.DbNull,
+        evidenceSignals: Prisma.DbNull,
       },
     });
 

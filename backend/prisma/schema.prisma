@@ -90,6 +90,33 @@ enum CallPostAnalysisStatus {
   INSUFFICIENT_DATA
 }
 
+enum TelephonyProvider {
+  TWILIO
+}
+
+enum VoiceAgentProvider {
+  OPENAI_REALTIME
+  HUME_EVI
+  LEGACY_ELEVENLABS
+  UNKNOWN
+}
+
+enum ProviderSyncStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum RecordingReconstructionStatus {
+  QUEUED
+  IN_PROGRESS
+  COMPLETE
+  ERROR
+  CANCELED
+  NOT_REQUESTED
+}
+
 enum CallIntentLevel {
   VERY_HIGH
   HIGH
@@ -97,6 +124,46 @@ enum CallIntentLevel {
   LOW
   NOT_INTERESTED
   UNKNOWN
+}
+
+enum LeadStage {
+  NEW
+  CONTACTED
+  QUALIFIED
+  FOLLOW_UP
+  MEETING_REQUESTED
+  MEETING_BOOKED
+  QUOTATION_SENT
+  WON
+  LOST
+}
+
+enum PreferredLanguage {
+  AUTO
+  ENGLISH
+  HINDI
+  GUJARATI
+}
+
+enum BookingStatus {
+  REQUESTED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum BookingAcceptanceStatus {
+  PENDING_ACCEPTANCE
+  ACCEPTED
+  DECLINED
+}
+
+enum BookingOutcome {
+  PENDING
+  WON
+  LOST
+  FOLLOW_UP
 }
 
 model Company {
@@ -238,8 +305,12 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  company       Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  assignedTasks Task[]  @relation("TaskAssignee")
+  company              Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignedTasks        Task[]    @relation("TaskAssignee")
+  assignedConversations Conversation[] @relation("ConversationAssignee")
+  assignedCalls        Call[]    @relation("CallAssignee")
+  assignedBookings     Booking[] @relation("BookingAssignee")
+  acceptedBookings     Booking[] @relation("BookingAcceptedBy")
 
   @@index([companyId])
   @@index([role])
@@ -254,12 +325,18 @@ model Customer {
   email     String?
   source    String?
 
-  leadScore     Int?
-  leadStage     String?
-  lastSeenAt    DateTime?
-  lastContactAt DateTime?
-  notes         String?
-  metadata      Json?
+  leadScore           Int?
+  leadStage           LeadStage?
+  requirementSummary  String?
+  requirementDetails  Json?
+  preferredLanguage   PreferredLanguage?
+  businessType        String?
+  budget              String?
+  timeline            String?
+  lastSeenAt          DateTime?
+  lastContactAt       DateTime?
+  notes               String?
+  metadata            Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -270,11 +347,13 @@ model Customer {
   bookings         Booking[]
   outboundMessages OutboundMessage[]
 
+  @@unique([companyId, phone])
   @@index([companyId])
   @@index([phone])
   @@index([email])
   @@index([source])
   @@index([leadStage])
+  @@index([leadScore])
   @@index([updatedAt])
 }
 
@@ -293,6 +372,7 @@ model Conversation {
   aiConfidence   Int     @default(0)
   humanNeeded    Boolean @default(false)
   bookingCreated Boolean @default(false)
+  assignedUserId String?
 
   provider           String?
   providerThreadId   String?
@@ -304,8 +384,9 @@ model Conversation {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  company  Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  company      Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  assignedUser User?     @relation("ConversationAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
 
   messages         Message[]
   calls            Call[]
@@ -315,6 +396,7 @@ model Conversation {
 
   @@index([companyId])
   @@index([customerId])
+  @@index([assignedUserId])
   @@index([channel])
   @@index([status])
   @@index([priority])
@@ -363,6 +445,18 @@ model Call {
   provider       String?
   providerCallId String? @unique
   direction      String? @default("INBOUND")
+  telephonyProvider  TelephonyProvider?    @default(TWILIO)
+  voiceAgentProvider VoiceAgentProvider?   @default(UNKNOWN)
+  twilioCallSid      String?
+  humeChatId         String?               @unique
+  humeChatGroupId    String?
+  humeConfigId       String?
+  humeEndReason      String?
+  transcriptSyncStatus ProviderSyncStatus? @default(PENDING)
+  humeSyncStatus       ProviderSyncStatus? @default(PENDING)
+  recordingReconstructionStatus RecordingReconstructionStatus? @default(NOT_REQUESTED)
+  expressionAnalysisStatus       ProviderSyncStatus?            @default(PENDING)
+  providerMetadataVersion        String?
 
   recordingUrl             String?
   recordingSid             String?
@@ -379,20 +473,122 @@ model Call {
   failureReason String?
   metadata      Json?
 
+  assignedUserId    String?
+  purpose           String?
+  notes             String?
+  nextAction        String?
+  preferredLanguage PreferredLanguage?
+  preferredCallTime DateTime?
+  summary           String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  conversation Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  postAnalysis CallPostAnalysis?
+  conversation           Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  assignedUser           User?                 @relation("CallAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  postAnalysis           CallPostAnalysis?
+  humeExpressionAnalysis HumeExpressionAnalysis?
+  humeSyncJobs           HumeChatSyncJob[]
+  humeToolCalls          HumeToolCallReceipt[]
+  bookings               Booking[]
 
   @@index([conversationId])
+  @@index([assignedUserId])
   @@index([phone])
   @@index([status])
   @@index([provider])
   @@index([providerCallId])
+  @@index([twilioCallSid])
+  @@index([humeChatId])
+  @@index([humeChatGroupId])
+  @@index([telephonyProvider])
+  @@index([voiceAgentProvider])
   @@index([recordingSid])
   @@index([createdAt])
   @@index([updatedAt])
+}
+
+model HumeWebhookReceipt {
+  id             String   @id @default(uuid())
+  idempotencyKey String   @unique
+  eventType      String
+  chatId         String?
+  callId         String?
+  companyId      String?
+  processedAt    DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@index([eventType])
+  @@index([chatId])
+  @@index([callId])
+  @@index([companyId])
+  @@index([createdAt])
+}
+
+model HumeToolCallReceipt {
+  id         String   @id @default(uuid())
+  toolCallId String   @unique
+  chatId     String
+  callId     String
+  companyId  String
+  toolName   String
+  status     String
+  error      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([chatId])
+  @@index([callId])
+  @@index([companyId])
+  @@index([toolName])
+}
+
+model HumeChatSyncJob {
+  id            String           @id @default(uuid())
+  callId         String
+  chatId         String
+  companyId      String
+  status         ProviderSyncStatus @default(PENDING)
+  attempts       Int              @default(0)
+  nextAttemptAt  DateTime?
+  lastError      String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, chatId])
+  @@index([status, nextAttemptAt])
+  @@index([chatId])
+  @@index([companyId])
+}
+
+model HumeExpressionAnalysis {
+  id                    String           @id @default(uuid())
+  callId                 String           @unique
+  companyId              String
+  chatId                 String
+  status                 ProviderSyncStatus @default(PENDING)
+  userTurnCount          Int              @default(0)
+  averageScores          Json?
+  topExpressions         Json?
+  expressionTimeline     Json?
+  insightSummary         String?
+  rawSchemaVersion       String?
+  failureReason          String?
+  completedAt            DateTime?
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([chatId])
+  @@index([status])
 }
 
 model CallPostAnalysis {
@@ -418,6 +614,7 @@ model CallPostAnalysis {
   processingStartedAt  DateTime?
   completedAt          DateTime?
   failureCode          String?
+  failureMessage       String?
   truncatedTranscript  Boolean   @default(false)
 
   createdAt DateTime @default(now())
@@ -491,21 +688,44 @@ model Booking {
   companyId      String
   customerId     String?
   conversationId String?
+  callId         String?
 
-  title     String
-  dateTime  DateTime?
-  status    String    @default("REQUESTED")
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @default(now()) @updatedAt
+  title            String
+  dateTime         DateTime?
+  timezone         String?
+  purpose          String?
+  status           BookingStatus           @default(REQUESTED)
+  acceptanceStatus BookingAcceptanceStatus @default(PENDING_ACCEPTANCE)
+  outcome          BookingOutcome          @default(PENDING)
+  assignedUserId   String?
+  acceptedByUserId String?
+  acceptedAt       DateTime?
+  notes            String?
+  proposalSent     Boolean                 @default(false)
+  proposalSentAt   DateTime?
+  nextAction       String?
+  cancelledAt      DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @default(now()) @updatedAt
 
   company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  call         Call?         @relation(fields: [callId], references: [id], onDelete: SetNull)
+  assignedUser User?         @relation("BookingAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  acceptedBy   User?         @relation("BookingAcceptedBy", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
 
   @@index([companyId])
   @@index([customerId])
   @@index([conversationId])
+  @@index([callId])
+  @@index([assignedUserId])
+  @@index([acceptedByUserId])
   @@index([status])
+  @@index([acceptanceStatus])
+  @@index([outcome])
+  @@index([proposalSent])
   @@index([dateTime])
   @@index([createdAt])
 }

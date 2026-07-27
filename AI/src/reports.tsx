@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import {
   AlertTriangle,
@@ -7,7 +7,6 @@ import {
   CheckCircle2,
   Clock3,
   Download,
-  FileText,
   Funnel,
   IndianRupee,
   Loader2,
@@ -256,7 +255,7 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  async function loadReports() {
+  const loadReports = useCallback(async () => {
     try {
       setLoading(true);
       setError("");
@@ -281,15 +280,15 @@ export default function ReportsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [range, compare, customStart, customEnd]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      loadReports();
+      void loadReports();
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [range, compare, customStart, customEnd]);
+  }, [loadReports]);
 
   const maxFunnelValue = useMemo(() => {
     if (!report) return 1;

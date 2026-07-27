@@ -1,4 +1,12 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   BookOpen,
   Bot,
@@ -94,7 +102,13 @@ export default function KnowledgePage() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
-  async function loadKnowledge(nextSelectedId?: string) {
+  const selectedItemRef = useRef(selectedItem);
+
+  useEffect(() => {
+    selectedItemRef.current = selectedItem;
+  }, [selectedItem]);
+
+  const loadKnowledge = useCallback(async (nextSelectedId?: string) => {
     try {
       setError("");
       setLoading(true);
@@ -116,7 +130,7 @@ export default function KnowledgePage() {
 
       const nextItem =
         data.items.find((item) => item.id === nextSelectedId) ||
-        data.items.find((item) => item.id === selectedItem?.id) ||
+        data.items.find((item) => item.id === selectedItemRef.current?.id) ||
         data.items[0] ||
         null;
 
@@ -128,7 +142,7 @@ export default function KnowledgePage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [search, category, active]);
 
   function selectItem(item: KnowledgeItem | null) {
     setSelectedItem(item);
@@ -243,11 +257,11 @@ export default function KnowledgePage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadKnowledge();
+      void loadKnowledge();
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [search, category, active]);
+  }, [loadKnowledge]);
 
   const categories = useMemo(() => {
     const unique = new Set<string>();

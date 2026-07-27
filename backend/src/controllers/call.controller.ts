@@ -1,7 +1,30 @@
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
+import { z } from "zod";
 import { prisma } from "../db/prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
+import {
+  pickLatestCompletedCallAnalysis,
+  withPostCallAnalysis,
+} from "../services/postCallAnalysisApi.service";
+
+const updateCallAssignmentSchema = z.object({
+  assignedUserId: z.string().uuid().nullable(),
+});
+
+function canManageCallAssignment(role: string) {
+  return role === "OWNER" || role === "ADMIN";
+}
+
+const callAssigneeInclude = {
+  assignedUser: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+    },
+  },
+} as const;
 
 function parseDate(value: unknown) {
   if (!value || typeof value !== "string") return null;
@@ -344,22 +367,39 @@ function withRecordingMediaUrl<
   };
 }
 
+function withCallApiFields<
+  T extends {
+    id: string;
+    recordingUrl?: string | null;
+    recordingSid?: string | null;
+    postAnalysis?: unknown;
+  },
+>(call: T) {
+  return withPostCallAnalysis(withRecordingMediaUrl(call));
+}
+
 function withConversationRecordingUrls<
   T extends {
     calls?: Array<{
       id: string;
       recordingUrl?: string | null;
       recordingSid?: string | null;
-      [key: string]: any;
+      postAnalysis?: unknown;
+      [key: string]: unknown;
     }>;
-    [key: string]: any;
+    [key: string]: unknown;
   },
 >(conversation: T) {
+  const calls = Array.isArray(conversation.calls)
+    ? conversation.calls.map((call) => withCallApiFields(call))
+    : conversation.calls;
+
   return {
     ...conversation,
-    calls: Array.isArray(conversation.calls)
-      ? conversation.calls.map((call) => withRecordingMediaUrl(call))
-      : conversation.calls,
+    calls,
+    latestCallAnalysis: Array.isArray(conversation.calls)
+      ? pickLatestCompletedCallAnalysis(conversation.calls)
+      : null,
   };
 }
 
@@ -394,6 +434,11 @@ export async function getCallConversations(req: AuthRequest, res: Response) {
                 createdAt: "desc",
               },
               take: 3,
+              include: {
+                ...callAssigneeInclude,
+                postAnalysis: true,
+                humeExpressionAnalysis: true,
+              },
             },
             messages: {
               orderBy: {
@@ -445,6 +490,9 @@ export async function getCallConversations(req: AuthRequest, res: Response) {
           },
           take: 10,
           include: {
+            ...callAssigneeInclude,
+            humeExpressionAnalysis: true,
+            postAnalysis: true,
             conversation: {
               include: {
                 customer: true,
@@ -469,7 +517,7 @@ export async function getCallConversations(req: AuthRequest, res: Response) {
       conversations: conversations.map((conversation) =>
         withConversationRecordingUrls(conversation)
       ),
-      latestCalls: latestCalls.map((call) => withRecordingMediaUrl(call)),
+      latestCalls: latestCalls.map((call) => withCallApiFields(call)),
       summary,
       pagination: {
         page,
@@ -509,6 +557,11 @@ export async function getCallConversationById(req: AuthRequest, res: Response) {
         calls: {
           orderBy: {
             createdAt: "desc",
+          },
+          include: {
+            ...callAssigneeInclude,
+            humeExpressionAnalysis: true,
+            postAnalysis: true,
           },
         },
         messages: {
@@ -550,7 +603,7 @@ export async function getCallConversationById(req: AuthRequest, res: Response) {
       conversation: withConversationRecordingUrls({
         ...conversation,
         computedTranscript,
-        latestCall: latestCall ? withRecordingMediaUrl(latestCall) : null,
+        latestCall: latestCall ? withCallApiFields(latestCall) : null,
       }),
     });
   } catch (error) {
@@ -582,6 +635,9 @@ export async function getCallById(req: AuthRequest, res: Response) {
         },
       },
       include: {
+        ...callAssigneeInclude,
+        humeExpressionAnalysis: true,
+        postAnalysis: true,
         conversation: {
           include: {
             customer: true,
@@ -599,6 +655,15 @@ export async function getCallById(req: AuthRequest, res: Response) {
               orderBy: {
                 createdAt: "desc",
               },
+              include: {
+                assignedUser: {
+                  select: {
+                    id: true,
+                    name: true,
+                    email: true,
+                  },
+                },
+              },
             },
           },
         },
@@ -612,7 +677,7 @@ export async function getCallById(req: AuthRequest, res: Response) {
     }
 
     return res.json({
-      call: withRecordingMediaUrl({
+      call: withCallApiFields({
         ...call,
         computedTranscript: buildTranscriptFromMessages(
           call.conversation.messages
@@ -660,6 +725,8 @@ export async function getCallRecordings(req: AuthRequest, res: Response) {
         skip,
         take: limit,
         include: {
+          humeExpressionAnalysis: true,
+          postAnalysis: true,
           conversation: {
             include: {
               customer: true,
@@ -674,7 +741,7 @@ export async function getCallRecordings(req: AuthRequest, res: Response) {
     ]);
 
     return res.json({
-      recordings: recordings.map((recording) => withRecordingMediaUrl(recording)),
+      recordings: recordings.map((recording) => withCallApiFields(recording)),
       pagination: {
         page,
         limit,
@@ -872,6 +939,123 @@ export async function markCallConversationResolved(
 
     return res.status(500).json({
       message: "Failed to resolve call conversation",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+export async function updateCallAssignment(req: AuthRequest, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    if (!canManageCallAssignment(req.user.role)) {
+      return res.status(403).json({ message: "Insufficient permissions to reassign calls" });
+    }
+
+    const parsed = updateCallAssignmentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Invalid input",
+        errors: parsed.error.flatten(),
+      });
+    }
+
+    const { callId } = req.params;
+    const { assignedUserId } = parsed.data;
+
+    const call = await prisma.call.findFirst({
+      where: {
+        id: callId,
+        conversation: {
+          companyId: req.user.companyId,
+          channel: "AI_CALL",
+        },
+      },
+      include: {
+        conversation: {
+          include: {
+            bookings: {
+              select: { id: true, assignedUserId: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!call) {
+      return res.status(404).json({ message: "Call not found" });
+    }
+
+    if (assignedUserId) {
+      const assignee = await prisma.user.findFirst({
+        where: {
+          id: assignedUserId,
+          companyId: req.user.companyId,
+          isActive: true,
+        },
+      });
+      if (!assignee) {
+        return res.status(404).json({ message: "Assigned user not found" });
+      }
+    }
+
+    const bookingIdsBefore = call.conversation.bookings.map((booking) => ({
+      id: booking.id,
+      assignedUserId: booking.assignedUserId,
+    }));
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextCall = await tx.call.update({
+        where: { id: call.id },
+        data: { assignedUserId },
+        include: callAssigneeInclude,
+      });
+
+      await tx.conversation.update({
+        where: { id: call.conversationId },
+        data: { assignedUserId },
+      });
+
+      return nextCall;
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        companyId: req.user.companyId,
+        userId: req.user.userId,
+        action: "CALL_ASSIGNMENT_UPDATED",
+        entityType: "Call",
+        entityId: call.id,
+        message: assignedUserId
+          ? "Call ownership reassigned"
+          : "Call ownership cleared",
+        metadata: {
+          assignedUserId,
+          conversationId: call.conversationId,
+        },
+      },
+    });
+
+    const bookingsAfter = await prisma.booking.findMany({
+      where: { conversationId: call.conversationId },
+      select: { id: true, assignedUserId: true },
+    });
+
+    return res.json({
+      message: "Call assignment updated",
+      call: withCallApiFields(updated),
+      conversationAssignedUserId: assignedUserId,
+      bookingOwnershipUnchanged: bookingsAfter.every((booking) => {
+        const before = bookingIdsBefore.find((item) => item.id === booking.id);
+        return before?.assignedUserId === booking.assignedUserId;
+      }),
+    });
+  } catch (error) {
+    console.error("Update call assignment error:", error);
+    return res.status(500).json({
+      message: "Failed to update call assignment",
       error: error instanceof Error ? error.message : String(error),
     });
   }

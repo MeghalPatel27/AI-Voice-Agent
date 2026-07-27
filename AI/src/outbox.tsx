@@ -1,6 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  AlertTriangle,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
   Bot,
   CheckCircle2,
   Clock3,
@@ -99,7 +105,13 @@ export default function OutboxPage() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
-  async function loadMessages(nextSelectedId?: string) {
+  const selectedMessageRef = useRef(selectedMessage);
+
+  useEffect(() => {
+    selectedMessageRef.current = selectedMessage;
+  }, [selectedMessage]);
+
+  const loadMessages = useCallback(async (nextSelectedId?: string) => {
     try {
       setError("");
       setLoading(true);
@@ -140,7 +152,7 @@ export default function OutboxPage() {
 
       const nextMessage =
         filtered.find((item) => item.id === nextSelectedId) ||
-        filtered.find((item) => item.id === selectedMessage?.id) ||
+        filtered.find((item) => item.id === selectedMessageRef.current?.id) ||
         filtered[0] ||
         null;
 
@@ -152,7 +164,7 @@ export default function OutboxPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [status, channel, search]);
 
   async function sendPending() {
     try {
@@ -215,11 +227,11 @@ export default function OutboxPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadMessages();
+      void loadMessages();
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [status, channel, search]);
+  }, [loadMessages]);
 
   const stats = useMemo(() => {
     return {

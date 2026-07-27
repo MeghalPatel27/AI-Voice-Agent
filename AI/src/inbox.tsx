@@ -1,4 +1,12 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   AlertTriangle,
   Bot,
@@ -109,6 +117,8 @@ type Call = {
   transcript?: string | null;
   status: string;
   provider?: string | null;
+  telephonyProvider?: string | null;
+  voiceAgentProvider?: string | null;
   providerCallId?: string | null;
   direction?: string | null;
   recordingUrl?: string | null;
@@ -125,6 +135,13 @@ type Call = {
   createdAt: string;
   updatedAt?: string;
   postCallAnalysis?: PostCallAnalysisView | null;
+  humeExpressionAnalysis?: {
+    status?: string;
+    userTurnCount?: number;
+    topExpressions?: Array<{ name: string; score: number }>;
+    averageScores?: Record<string, number>;
+    insightSummary?: string | null;
+  } | null;
 };
 
 type Task = {
@@ -396,11 +413,11 @@ function buildIntegrationHealthFromSettings(
       connected: isLiveStatus(calls?.status) || current.calls.connected,
       label:
         calls?.status === "CONNECTED" || calls?.status === "LIVE"
-          ? `Twilio realtime voice connected${
+          ? `Twilio telephony + Hume EVI connected${
               calls.businessPhoneNumber ? ` · ${calls.businessPhoneNumber}` : ""
             }`
           : calls?.status === "TESTING"
-            ? "Twilio is in testing mode. Finish OpenAI realtime/public webhook setup."
+            ? "Twilio is in testing mode. Finish Hume EVI/public webhook setup."
             : current.calls.label,
     },
     website: {
@@ -487,7 +504,13 @@ export default function InboxPage() {
   const [whatsAppPhone, setWhatsAppPhone] = useState("");
   const [whatsAppInitialMessage, setWhatsAppInitialMessage] = useState("");
 
-  async function loadInbox(nextSelectedId?: string) {
+  const selectedIdRef = useRef(selectedId);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  const loadInbox = useCallback(async (nextSelectedId?: string) => {
     try {
       setError("");
       setLoadingList(true);
@@ -516,7 +539,7 @@ export default function InboxPage() {
 
       const nextId =
         nextSelectedId ||
-        selectedId ||
+        selectedIdRef.current ||
         data.conversations[0]?.id ||
         "";
 
@@ -532,7 +555,7 @@ export default function InboxPage() {
     } finally {
       setLoadingList(false);
     }
-  }
+  }, [filter, channel, search]);
 
   async function loadConversation(id: string) {
     try {
@@ -769,14 +792,22 @@ export default function InboxPage() {
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      loadInbox();
+      void loadInbox();
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [filter, channel, search]);
+  }, [loadInbox]);
+
+  const latestCallStatus = selectedConversation?.latestCall?.status;
+  const firstCallStatus = selectedConversation?.calls?.[0]?.status;
+  const latestAnalysisStatus =
+    selectedConversation?.latestCallAnalysis?.analysisStatus;
+  const firstCallAnalysisStatus =
+    selectedConversation?.calls?.[0]?.postCallAnalysis?.analysisStatus;
 
   useEffect(() => {
-    const call = selectedConversation?.latestCall || selectedConversation?.calls?.[0];
+    const call =
+      selectedConversation?.latestCall || selectedConversation?.calls?.[0];
     const analysis =
       call?.postCallAnalysis || selectedConversation?.latestCallAnalysis || null;
     const needsRefresh =
@@ -793,10 +824,11 @@ export default function InboxPage() {
     return () => window.clearInterval(timer);
   }, [
     selectedId,
-    selectedConversation?.latestCall?.status,
-    selectedConversation?.calls?.[0]?.status,
-    selectedConversation?.latestCallAnalysis?.analysisStatus,
-    selectedConversation?.calls?.[0]?.postCallAnalysis?.analysisStatus,
+    latestCallStatus,
+    firstCallStatus,
+    latestAnalysisStatus,
+    firstCallAnalysisStatus,
+    selectedConversation,
   ]);
 
   const selectedCall = useMemo(() => {
@@ -2045,7 +2077,7 @@ function CallDetail({
               {isLiveCallStatus(call.status) ? "Call ongoing" : "Call ended"}
             </Badge>
             <Badge tone="normal">{formatEnum(call.status)}</Badge>
-            {call.recordingUrl ? <Badge tone="success">Recording saved</Badge> : null}
+            {call.recordingUrl ? <Badge tone="success">Recording available</Badge> : null}
             {transcript ? <Badge tone="success">Transcript saved</Badge> : null}
           </div>
         </div>
@@ -2064,7 +2096,7 @@ function CallDetail({
             </div>
           ) : (
             <p className="mt-5 text-sm leading-6 text-white/40">
-              No recording saved for this call yet. When Twilio sends the recording callback, it will appear here.
+              Recording is not ready yet. Hume reconstruction may still be processing.
             </p>
           )}
         </div>
@@ -2084,8 +2116,50 @@ function CallDetail({
         </div>
       </div>
 
+      <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
+        <div className="flex items-center gap-2 text-sm font-semibold text-white/70">
+          <Sparkles size={17} />
+          Hume Conversation Insights
+        </div>
+        {call.humeExpressionAnalysis ? (
+          <div className="mt-5 space-y-3">
+            <div className="flex flex-wrap gap-2">
+              <Badge tone="normal">
+                Sync: {formatEnum(call.humeExpressionAnalysis.status || "PENDING")}
+              </Badge>
+              <Badge tone="normal">
+                User turns: {call.humeExpressionAnalysis.userTurnCount || 0}
+              </Badge>
+            </div>
+            {(call.humeExpressionAnalysis.topExpressions || []).length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {(call.humeExpressionAnalysis.topExpressions || []).slice(0, 3).map((item) => (
+                  <Badge key={item.name} tone="success">
+                    {item.name}: {Math.round((item.score || 0) * 100)}%
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
+            <p className="text-sm text-white/45">
+              These scores are vocal-expression analytics only and are not sales intent.
+            </p>
+          </div>
+        ) : (
+          <p className="mt-5 text-sm text-white/40">
+            Expression insights will appear after Hume chat sync completes.
+          </p>
+        )}
+      </div>
+
       <div className="grid gap-5 xl:grid-cols-3">
-        <InfoBox label="Provider" value={call.provider || "Twilio"} />
+        <InfoBox
+          label="Telephony"
+          value={call.telephonyProvider || call.provider || "TWILIO"}
+        />
+        <InfoBox
+          label="Voice agent"
+          value={call.voiceAgentProvider || "HUME_EVI"}
+        />
         <InfoBox label="Provider call ID" value={call.providerCallId || "Not available"} />
         <InfoBox label="Recording SID" value={call.recordingSid || "Not available"} />
         <InfoBox label="Recording status" value={call.recordingStatus || "Not available"} />

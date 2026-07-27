@@ -1,13 +1,11 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import {
   AlertTriangle,
-  Bot,
   CalendarClock,
   CheckCircle2,
   FileText,
   Clock3,
-  Flag,
   Loader2,
   PhoneCall,
   Plus,
@@ -17,7 +15,6 @@ import {
   ShieldAlert,
   Sparkles,
   Trash2,
-  UserRound,
   Zap,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
@@ -179,17 +176,6 @@ function formatEnum(value?: string | null) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function formatDateTime(value?: string | null) {
-  if (!value) return "No deadline";
-
-  return new Date(value).toLocaleString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 function formatTime(value?: string | null) {
   if (!value) return "-";
 
@@ -245,7 +231,9 @@ export default function TasksPage() {
 
   const [filter, setFilter] = useState<Filter>("ALL");
   const [priority, setPriority] = useState<"ALL" | Priority>("ALL");
-  const [assignee, setAssignee] = useState("ALL");
+  const [assignee, setAssignee] = useState(
+    () => searchParams.get("assignee") || "ALL"
+  );
   const [taskType, setTaskType] = useState("ALL");
   const [search, setSearch] = useState("");
 
@@ -306,7 +294,25 @@ export default function TasksPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  async function loadTasks(nextSelectedId?: string) {
+  function syncDraftFromTask(task: TaskRow) {
+    setDraftTitle(task.title);
+    setDraftDescription(task.description || "");
+    setDraftAssignedUserId(task.assignedUserId || "");
+    setDraftManualOwner(task.manualOwner || "");
+    setDraftDueAt(toDateInput(task.dueAt));
+    setDraftPriority(task.priority);
+    setDraftStatus(task.status);
+    setDraftAiNotes(task.aiNotes || "");
+    setDraftBlockedReason(task.blockedReason || "");
+  }
+
+  const selectedIdRef = useRef(selectedId);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  const loadTasks = useCallback(async (nextSelectedId?: string) => {
     try {
       setError("");
       setLoading(true);
@@ -332,15 +338,18 @@ export default function TasksPage() {
       setTeamMembers(data.teamMembers);
       setTaskTypes(data.taskTypes);
 
-      const nextId = nextSelectedId || selectedId || data.tasks[0]?.id || "";
+      const nextId =
+        nextSelectedId || selectedIdRef.current || data.tasks[0]?.id || "";
       const found = data.tasks.find((task) => task.id === nextId) || null;
 
       if (found) {
         setSelectedId(found.id);
         setSelectedTask(found);
+        syncDraftFromTask(found);
       } else if (data.tasks[0]) {
         setSelectedId(data.tasks[0].id);
         setSelectedTask(data.tasks[0]);
+        syncDraftFromTask(data.tasks[0]);
       } else {
         setSelectedId("");
         setSelectedTask(null);
@@ -350,11 +359,12 @@ export default function TasksPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [filter, priority, assignee, taskType, search]);
 
   function selectTask(task: TaskRow) {
     setSelectedTask(task);
     setSelectedId(task.id);
+    syncDraftFromTask(task);
   }
 
   async function createTask(event: FormEvent) {
@@ -583,34 +593,12 @@ export default function TasksPage() {
   }
 
   useEffect(() => {
-    const queryAssignee = searchParams.get("assignee");
-
-    if (queryAssignee) {
-      setAssignee(queryAssignee);
-    }
-  }, [searchParams]);
-
-  useEffect(() => {
     const timeout = window.setTimeout(() => {
-      loadTasks();
+      void loadTasks();
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [filter, priority, assignee, taskType, search]);
-
-  useEffect(() => {
-    if (!selectedTask) return;
-
-    setDraftTitle(selectedTask.title);
-    setDraftDescription(selectedTask.description || "");
-    setDraftAssignedUserId(selectedTask.assignedUserId || "");
-    setDraftManualOwner(selectedTask.manualOwner || "");
-    setDraftDueAt(toDateInput(selectedTask.dueAt));
-    setDraftPriority(selectedTask.priority);
-    setDraftStatus(selectedTask.status);
-    setDraftAiNotes(selectedTask.aiNotes || "");
-    setDraftBlockedReason(selectedTask.blockedReason || "");
-  }, [selectedTask]);
+  }, [loadTasks]);
 
   const assigneeOptions = useMemo(() => {
     return [

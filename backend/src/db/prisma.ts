@@ -31,9 +31,7 @@ const pool =
     max: Number(process.env.PG_POOL_MAX || 10),
     keepAlive: true,
     allowExitOnIdle: true,
-    // Supabase terminates idle sockets; recycle before they go stale.
-    maxLifetime: Number(process.env.PG_MAX_USES || 7500),
-  });
+  } satisfies ConstructorParameters<typeof Pool>[0]);
 
 pool.on("error", (error) => {
   console.error(

@@ -696,7 +696,16 @@ function buildLeadWhere(
 
   if (query.filter === "QUOTATION_SENT") {
     and.push({
-      id: "__quotation_module_not_enabled__",
+      OR: [
+        { leadStage: "QUOTATION_SENT" },
+        {
+          bookings: {
+            some: {
+              proposalSent: true,
+            },
+          },
+        },
+      ],
     });
   }
 

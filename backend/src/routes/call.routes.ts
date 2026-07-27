@@ -6,18 +6,21 @@ import {
   getCallRecordings,
   markCallConversationHumanRequired,
   markCallConversationResolved,
+  updateCallAssignment,
   updateCallTranscript,
 } from "../controllers/call.controller";
 import {
   handleStartAiOutboundCall,
   handleTwilioRecordingMedia,
-} from "../controllers/voice.controller";
+} from "../controllers/voiceHume.controller";
 import { authMiddleware } from "../middleware/auth.middleware";
 
 const router = Router();
 
 router.get("/", authMiddleware, getCallConversations);
 router.get("/recordings", authMiddleware, getCallRecordings);
+
+router.patch("/:callId/assignment", authMiddleware, updateCallAssignment);
 
 router.post("/outbound-ai", authMiddleware, handleStartAiOutboundCall);
 

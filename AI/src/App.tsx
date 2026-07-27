@@ -23,14 +23,17 @@ export default function App() {
           <Route path="/command-center" element={<Navigate to="/dashboard" replace />} />
 
           <Route path="/inbox" element={protectedPage()} />
-          <Route path="/calls" element={<Navigate to="/inbox" replace />} />
           <Route path="/whatsapp" element={<Navigate to="/inbox" replace />} />
+
+          <Route path="/calls" element={protectedPage()} />
 
           <Route path="/leads" element={protectedPage()} />
           <Route path="/customers" element={<Navigate to="/leads" replace />} />
           <Route path="/pipeline" element={<Navigate to="/leads" replace />} />
           <Route path="/handover" element={<Navigate to="/leads" replace />} />
-          <Route path="/bookings" element={<Navigate to="/leads" replace />} />
+
+          <Route path="/bookings" element={protectedPage()} />
+          <Route path="/meetings" element={<Navigate to="/bookings" replace />} />
 
           <Route path="/tasks" element={protectedPage()} />
 

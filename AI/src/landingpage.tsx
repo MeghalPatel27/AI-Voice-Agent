@@ -3,12 +3,14 @@ import {
   Bell,
   Bot,
   Brain,
+  CalendarCheck,
   CheckCircle2,
   Command,
   Filter,
   Inbox,
   LayoutDashboard,
   LineChart,
+  PhoneCall,
   Search,
   Settings,
   Sparkles,
@@ -19,6 +21,8 @@ import {
 import CommandCenter from "./commandcenter";
 import InboxPage from "./inbox";
 import CustomersPage from "./customers";
+import CallsPage from "./calls";
+import BookingsPage from "./bookings";
 import TasksPage from "./tasks";
 import SettingsPage from "./settings";
 import ReportsPage from "./reports";
@@ -28,7 +32,9 @@ import AiCeoChat from "./aiCeoChat";
 type Section =
   | "Dashboard"
   | "Inbox"
+  | "Calls"
   | "Leads"
+  | "Meetings"
   | "Tasks"
   | "Team"
   | "Reports"
@@ -56,9 +62,21 @@ const navItems: NavItem[] = [
     count: 0,
   },
   {
+    label: "Calls",
+    icon: PhoneCall,
+    path: "/calls",
+    count: 0,
+  },
+  {
     label: "Leads",
     icon: UsersRound,
     path: "/leads",
+    count: 0,
+  },
+  {
+    label: "Meetings",
+    icon: CalendarCheck,
+    path: "/bookings",
     count: 0,
   },
   {
@@ -93,13 +111,16 @@ const sectionByPath: Record<string, Section> = {
 
   "/inbox": "Inbox",
   "/whatsapp": "Inbox",
-  "/calls": "Inbox",
+
+  "/calls": "Calls",
 
   "/leads": "Leads",
   "/customers": "Leads",
   "/pipeline": "Leads",
   "/handover": "Leads",
-  "/bookings": "Leads",
+
+  "/bookings": "Meetings",
+  "/meetings": "Meetings",
 
   "/tasks": "Tasks",
 
@@ -407,8 +428,12 @@ export default function LandingPage() {
                 <CommandCenter />
               ) : activeSection === "Inbox" ? (
                 <InboxPage />
+              ) : activeSection === "Calls" ? (
+                <CallsPage />
               ) : activeSection === "Leads" ? (
                 <CustomersPage />
+              ) : activeSection === "Meetings" ? (
+                <BookingsPage />
               ) : activeSection === "Tasks" ? (
                 <TasksPage />
               ) : activeSection === "Team" ? (

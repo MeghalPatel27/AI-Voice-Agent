@@ -1,3 +1,8 @@
+## 2026-07 Hume EVI Update
+
+- Active AI-call runtime for new calls is now `Twilio telephony -> Hume EVI`.
+- OpenAI remains active for text and post-call analysis features.
+- Historical sections describing Twilio Media Streams + OpenAI Realtime + ElevenLabs are retained as audit history only.
 # Technical Architecture
 
 ## 1. Architecture summary

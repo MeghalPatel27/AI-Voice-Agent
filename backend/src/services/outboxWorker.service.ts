@@ -56,8 +56,8 @@ export async function runOutboxWorkerOnce() {
     }
 
     return {
-      skipped: false,
       ...outboundResult,
+      workerSkipped: false,
       aiScheduledCalls: aiCallResult,
     };
   } catch (error) {

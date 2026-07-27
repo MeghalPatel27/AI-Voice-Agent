@@ -1,8 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
-  Bot,
-  CalendarCheck,
   CheckCircle2,
   Clock3,
   Columns3,
@@ -13,7 +11,6 @@ import {
   Search,
   Send,
   ShieldAlert,
-  UserRound,
   XCircle,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
@@ -118,7 +115,13 @@ export default function PipelinePage() {
     return columns.flatMap((column) => column.conversations);
   }, [columns]);
 
-  async function loadPipeline() {
+  const selectedConversationRef = useRef(selectedConversation);
+
+  useEffect(() => {
+    selectedConversationRef.current = selectedConversation;
+  }, [selectedConversation]);
+
+  const loadPipeline = useCallback(async () => {
     try {
       setLoading(true);
       setError("");
@@ -139,7 +142,10 @@ export default function PipelinePage() {
 
       const existingSelected = data.columns
         .flatMap((column) => column.conversations)
-        .find((conversation) => conversation.id === selectedConversation?.id);
+        .find(
+          (conversation) =>
+            conversation.id === selectedConversationRef.current?.id
+        );
 
       setSelectedConversation(
         existingSelected ||
@@ -151,7 +157,7 @@ export default function PipelinePage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [search, channel]);
 
   async function moveConversation(
     conversation: PipelineConversation,
@@ -182,11 +188,11 @@ export default function PipelinePage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadPipeline();
+      void loadPipeline();
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [search, channel]);
+  }, [loadPipeline]);
 
   return (
     <section className="flex h-[calc(100vh-112px)] min-h-[680px] flex-col overflow-hidden rounded-[32px] border border-white/10 bg-white/[0.04]">

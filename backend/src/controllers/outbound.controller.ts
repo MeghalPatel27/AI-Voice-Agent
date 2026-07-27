@@ -209,6 +209,12 @@ export async function sendSingleOutboundMessage(req: AuthRequest, res: Response)
 
     const { id } = req.params;
 
+    if (!id) {
+      return res.status(400).json({
+        message: "Outbound message id is required",
+      });
+    }
+
     const result = await deliverOutboundMessageById(id, req.user.companyId);
 
     return res.json({

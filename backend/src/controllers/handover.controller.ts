@@ -161,6 +161,12 @@ export async function updateHandoverConversation(
 
     const { id } = req.params;
 
+    if (!id) {
+      return res.status(400).json({
+        message: "Conversation id is required",
+      });
+    }
+
     const existingConversation = await prisma.conversation.findFirst({
       where: {
         id,
@@ -272,6 +278,12 @@ export async function addHumanNote(req: AuthRequest, res: Response) {
     }
 
     const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        message: "Conversation id is required",
+      });
+    }
 
     const existingConversation = await prisma.conversation.findFirst({
       where: {

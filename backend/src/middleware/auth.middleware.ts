@@ -8,7 +8,7 @@ type AuthPayload = {
   industry?: string | null;
 };
 
-export type AuthRequest = Request & {
+export type AuthRequest = Request<Record<string, string>> & {
   user?: AuthPayload;
 };
 
@@ -27,13 +27,20 @@ export function authMiddleware(
     }
 
     const token = authHeader.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).json({
+        message: "Unauthorized",
+      });
+    }
+
     const jwtSecret = process.env.JWT_SECRET;
 
     if (!jwtSecret) {
       throw new Error("JWT_SECRET is missing");
     }
 
-    const decoded = jwt.verify(token, jwtSecret) as AuthPayload;
+    const decoded = jwt.verify(token, jwtSecret) as unknown as AuthPayload;
 
     req.user = {
       userId: decoded.userId,

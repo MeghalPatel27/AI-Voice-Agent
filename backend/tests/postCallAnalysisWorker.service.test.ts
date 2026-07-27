@@ -5,6 +5,8 @@ const {
   updateManyMock,
   findUniqueMock,
   updateMock,
+  callFindUniqueMock,
+  customerUpdateMock,
   loadTranscriptMock,
   analyzeMock,
 } = vi.hoisted(() => ({
@@ -12,6 +14,8 @@ const {
   updateManyMock: vi.fn(),
   findUniqueMock: vi.fn(),
   updateMock: vi.fn(),
+  callFindUniqueMock: vi.fn(),
+  customerUpdateMock: vi.fn(),
   loadTranscriptMock: vi.fn(),
   analyzeMock: vi.fn(),
 }));
@@ -23,6 +27,12 @@ vi.mock("../src/db/prisma", () => ({
       updateMany: updateManyMock,
       findUnique: findUniqueMock,
       update: updateMock,
+    },
+    call: {
+      findUnique: callFindUniqueMock,
+    },
+    customer: {
+      update: customerUpdateMock,
     },
   },
 }));
@@ -45,6 +55,8 @@ describe("postCallAnalysisWorker", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     updateManyMock.mockResolvedValue({ count: 0 });
+    callFindUniqueMock.mockResolvedValue(null);
+    customerUpdateMock.mockResolvedValue({});
   });
 
   it("claims an eligible pending analysis once", async () => {
@@ -107,6 +119,10 @@ describe("postCallAnalysisWorker", () => {
       evidenceSignals: ["Asked for pricing", "Requested demo"],
     });
     updateMock.mockResolvedValue({});
+    callFindUniqueMock.mockResolvedValue({
+      id: "call_1",
+      conversation: { customerId: "customer_1" },
+    });
 
     const result = await runPostCallAnalysisWorkerOnce(1);
 
@@ -335,6 +351,10 @@ describe("postCallAnalysisWorker", () => {
         evidenceSignals: ["Requested demo"],
       });
     updateMock.mockResolvedValue({});
+    callFindUniqueMock.mockResolvedValue({
+      id: "call_b",
+      conversation: { customerId: "customer_b" },
+    });
 
     const result = await runPostCallAnalysisWorkerOnce(2);
 

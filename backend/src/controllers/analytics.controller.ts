@@ -41,7 +41,13 @@ export async function getAnalyticsOverview(req: AuthRequest, res: Response) {
     const companyId = req.user.companyId;
 
     const sevenDays = getLast7Days();
-    const sevenDaysAgo = sevenDays[0].date;
+    const firstDay = sevenDays[0];
+    if (!firstDay) {
+      return res.status(500).json({
+        message: "Failed to compute analytics date range",
+      });
+    }
+    const sevenDaysAgo = firstDay.date;
 
     const [
       totalCustomers,

@@ -1,4 +1,5 @@
 import { prisma } from "../db/prisma";
+import { buildHumeTwilioUrl } from "../integrations/hume/hume.config";
 
 const AI_CALL_TASK_KIND = "AI_SCHEDULED_CALL";
 const AI_CALL_OWNER = "AI Caller";
@@ -295,7 +296,6 @@ async function startScheduledAiCallForTask(task: any) {
           conversationId: conversation.id,
           startedAt: new Date().toISOString(),
           scheduledAtLabel,
-          scheduledAtLabel,
         },
         null,
         2,
@@ -303,9 +303,7 @@ async function startScheduledAiCallForTask(task: any) {
     },
   });
 
-  const answerUrl = `${publicUrl}/api/voice/twilio/outbound-answer?conversationId=${encodeURIComponent(
-    conversation.id,
-  )}&preferredLanguage=${encodeURIComponent(preferredLanguage)}`;
+  const answerUrl = buildHumeTwilioUrl();
 
   const body = new URLSearchParams({
     To: phone,
@@ -314,19 +312,12 @@ async function startScheduledAiCallForTask(task: any) {
     Method: "POST",
     StatusCallback: `${publicUrl}/api/voice/twilio/status`,
     StatusCallbackMethod: "POST",
-    Record: "true",
-    RecordingChannels: "dual",
-    RecordingStatusCallback: `${publicUrl}/api/voice/twilio/recording`,
-    RecordingStatusCallbackMethod: "POST",
   });
 
   body.append("StatusCallbackEvent", "initiated");
   body.append("StatusCallbackEvent", "ringing");
   body.append("StatusCallbackEvent", "answered");
   body.append("StatusCallbackEvent", "completed");
-  body.append("RecordingStatusCallbackEvent", "in-progress");
-  body.append("RecordingStatusCallbackEvent", "completed");
-  body.append("RecordingStatusCallbackEvent", "absent");
 
   const response = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls.json`,
@@ -385,10 +376,16 @@ async function startScheduledAiCallForTask(task: any) {
       phone,
       provider: "twilio",
       providerCallId: callSid || null,
+      twilioCallSid: callSid || null,
+      telephonyProvider: "TWILIO",
+      voiceAgentProvider: "HUME_EVI",
+      humeConfigId: process.env.HUME_CONFIG_ID || null,
       direction: "OUTBOUND",
       status: initialCallStatus,
       durationSeconds: 0,
       startedAt: new Date(),
+      recordingSource: "HUME",
+      recordingReconstructionStatus: "NOT_REQUESTED",
       metadata: {
         source: "AI_SCHEDULED_CALL_TASK",
         taskId: task.id,

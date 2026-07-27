@@ -1,8 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { createServer } from "http";
-import { WebSocketServer } from "ws";
 
 import authRoutes from "./routes/auth.routes";
 import dashboardRoutes from "./routes/dashboard.routes";
@@ -31,7 +29,11 @@ import voiceRoutes from "./routes/voice.routes";
 import reportsRoutes from "./routes/reports.routes";
 import aiCeoRoutes from "./routes/aiCeo.routes";
 import aiProviderRoutes from "./routes/aiProvider.routes";
-import { handleTwilioRealtimeConnection } from "./controllers/voice.controller";
+import humeWebhookRoutes from "./routes/humeWebhook.routes";
+import {
+  startHumeSyncWorker,
+  stopHumeSyncWorker,
+} from "./integrations/hume/humeSyncWorker.service";
 
 const app = express();
 
@@ -44,6 +46,27 @@ app.use(
     origin: process.env.FRONTEND_URL || "http://localhost:5173",
     credentials: true,
   })
+);
+
+app.use(
+  "/api/webhooks/hume",
+  express.raw({
+    type: "application/json",
+    verify: (req, _res, buf) => {
+      (req as any).rawBody = Buffer.from(buf);
+    },
+  }),
+  (req, _res, next) => {
+    try {
+      if (Buffer.isBuffer(req.body)) {
+        req.body = JSON.parse(req.body.toString("utf8"));
+      }
+    } catch {
+      req.body = {};
+    }
+    next();
+  },
+  humeWebhookRoutes
 );
 
 app.use(express.json({ limit: "10mb" }));
@@ -97,47 +120,18 @@ app.use((req, res) => {
   });
 });
 
-/**
- * IMPORTANT:
- * We cannot use app.listen() for realtime voice.
- * We need an HTTP server so WebSocket can attach to it.
- */
-const server = createServer(app);
-
-/**
- * Twilio Media Streams WebSocket endpoint.
- *
- * Twilio will connect to:
- * wss://YOUR_NGROK_URL/api/voice/twilio/realtime
- *
- * This is the route that removes the slow old Gather/Say delay.
- */
-const twilioRealtimeWss = new WebSocketServer({
-  server,
-  path: "/api/voice/twilio/realtime",
-});
-
-twilioRealtimeWss.on("connection", (twilioSocket, request) => {
-  handleTwilioRealtimeConnection(twilioSocket, request);
-});
-
-twilioRealtimeWss.on("error", (error) => {
-  console.error("Twilio realtime WebSocket server error:", error);
-});
-
-server.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(
-    `Twilio realtime WebSocket ready at /api/voice/twilio/realtime`
-  );
   startOutboxWorker();
   startPostCallAnalysisWorker();
+  startHumeSyncWorker();
 });
 
 function shutdownWorkers(signal: string) {
   console.log(`Received ${signal}, stopping background workers`);
   stopOutboxWorker();
   stopPostCallAnalysisWorker();
+  stopHumeSyncWorker();
 }
 
 process.once("SIGINT", () => shutdownWorkers("SIGINT"));

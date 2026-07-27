@@ -1,7 +1,7 @@
-import { FormEvent, useState } from "react";
+import { useState, type FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router";
 import { Bot, Building2, LockKeyhole, Mail, Sparkles, User } from "lucide-react";
-import { Industry, useAuth } from "./AuthContext";
+import { useAuth, type Industry } from "./AuthContext";
 
 const industries: { label: string; value: Industry }[] = [
   { label: "Other / General", value: "OTHER" },

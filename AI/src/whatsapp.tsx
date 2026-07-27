@@ -1,4 +1,12 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   AlertTriangle,
   Bot,
@@ -157,6 +165,12 @@ export default function WhatsAppPage() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
+  const selectedIdRef = useRef(selectedId);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
   async function loadOutboundMessages() {
     const data = await apiFetch<OutboundResponse>(
       "/api/outbound?channel=WHATSAPP"
@@ -165,7 +179,7 @@ export default function WhatsAppPage() {
     setOutboundMessages(data.messages);
   }
 
-  async function loadConversations(nextSelectedId?: string) {
+  const loadConversations = useCallback(async (nextSelectedId?: string) => {
     try {
       setError("");
       setLoadingList(true);
@@ -184,7 +198,7 @@ export default function WhatsAppPage() {
 
       const idToOpen =
         nextSelectedId ||
-        selectedId ||
+        selectedIdRef.current ||
         data.conversations[0]?.id ||
         "";
 
@@ -204,7 +218,7 @@ export default function WhatsAppPage() {
     } finally {
       setLoadingList(false);
     }
-  }
+  }, [status, search]);
 
   async function loadConversation(id: string) {
     try {
@@ -294,11 +308,11 @@ export default function WhatsAppPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadConversations();
+      void loadConversations();
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [search, status]);
+  }, [loadConversations]);
 
   const stats = useMemo(() => {
     const pending = outboundMessages.filter(

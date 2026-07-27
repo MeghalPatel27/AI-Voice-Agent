@@ -157,7 +157,7 @@ describe("finalizeCall", () => {
     });
 
     expect(result.status).toBe("COMPLETED");
-    expect(callUpdateMock.mock.calls[0][0].data.endReason).toBe(
+    expect(callUpdateMock.mock.calls[0]?.[0].data.endReason).toBe(
       "ai_goodbye_complete",
     );
   });
@@ -216,8 +216,8 @@ describe("finalizeCall", () => {
     });
 
     expect(result.alreadyTerminal).toBe(true);
-    expect(callUpdateMock.mock.calls[0][0].data.endedAt).toEqual(endedAt);
-    expect(callUpdateMock.mock.calls[0][0].data.endReason).toBe(
+    expect(callUpdateMock.mock.calls[0]?.[0].data.endedAt).toEqual(endedAt);
+    expect(callUpdateMock.mock.calls[0]?.[0].data.endReason).toBe(
       "twilio_media_stream_stopped",
     );
     expect(analysisCreateMock).not.toHaveBeenCalled();

@@ -28,15 +28,15 @@ type DecisionInput = {
   handoverRules?: string | null;
   businessHours?: string | null;
   aiTone?: string | null;
+  knowledgeBase?: {
+    title: string;
+    category: string;
+    content: string;
+  }[];
   conversationHistory?: {
     senderType: "CUSTOMER" | "AI" | "HUMAN";
     body: string;
     createdAt?: string;
-    knowledgeBase?: {
-  title: string;
-  category: string;
-  content: string;
-}[];
   }[];
 };
 
