@@ -1,0 +1,656 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  STAFF
+}
+
+enum ConversationChannel {
+  AI_CALL
+  WHATSAPP
+  WEBSITE_CHAT
+}
+
+enum ConversationStatus {
+  NEW
+  IN_PROGRESS
+  FOLLOW_UP
+  CONVERTED
+  HUMAN_REQUIRED
+  LOST
+}
+
+enum Priority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum MessageSender {
+  CUSTOMER
+  AI
+  HUMAN
+}
+
+enum CallStatus {
+  RINGING
+  IN_PROGRESS
+  LIVE
+  COMPLETED
+  NO_ANSWER
+  BUSY
+  CANCELED
+  FAILED
+  MISSED
+  TRANSFERRED
+}
+
+enum TaskStatus {
+  OPEN
+  DOING
+  BLOCKED
+  DONE
+}
+
+enum AgentStatus {
+  LIVE
+  TESTING
+  PAUSED
+  NOT_CONNECTED
+}
+
+enum Industry {
+  HOSPITAL
+  CLINIC
+  HOTEL
+  RESTAURANT
+  REAL_ESTATE
+  OTHER
+}
+
+enum OutboundStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum CallPostAnalysisStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  INSUFFICIENT_DATA
+}
+
+enum CallIntentLevel {
+  VERY_HIGH
+  HIGH
+  MEDIUM
+  LOW
+  NOT_INTERESTED
+  UNKNOWN
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  industry  Industry @default(OTHER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  users                  User[]
+  customers              Customer[]
+  conversations          Conversation[]
+  tasks                  Task[]
+  aiAgents               AiAgent[]
+  bookings               Booking[]
+  settings               CompanySettings?
+  outboundMessages       OutboundMessage[]
+  knowledgeItems         KnowledgeItem[]
+  crmStages              CrmStage[]
+  handoffRules           HandoffRule[]
+  notificationRules      NotificationRule[]
+  auditLogs              AuditLog[]
+  integrationConnections IntegrationConnection[]
+  callPostAnalyses       CallPostAnalysis[]
+}
+
+model CompanySettings {
+  id        String @id @default(cuid())
+  companyId String @unique
+
+  businessType String?
+  address      String?
+  city         String?
+  country      String?
+  timezone     String? @default("Asia/Kolkata")
+  websiteUrl   String?
+  brandTone    String?
+
+  defaultLanguage    String? @default("English")
+  supportedLanguages Json?
+
+  businessHours Json?
+  closedDays    Json?
+
+  mainWhatsappNumber        String?
+  mainCallNumber            String?
+  callForwardingNumber      String?
+  emergencyEscalationNumber String?
+
+  whatsappNumber  String?
+  escalationPhone String?
+  handoverRules   String?
+  aiTone          String?
+  webhookSecret   String? @unique
+
+  aiName                String? @default("AI Assistant")
+  aiReplyMode           String? @default("DRAFT_ONLY")
+  aiReplyLength         String? @default("MEDIUM")
+  aiConfidenceThreshold Int     @default(75)
+  aiAllowedActions      Json?
+  aiRestrictedActions   Json?
+  aiFallbackResponse    String?
+
+  channelSettings      Json?
+  handoffSettings      Json?
+  notificationSettings Json?
+  taskWorkflowSettings Json?
+  securitySettings     Json?
+  billingSettings      Json?
+
+  whatsappProviderMode       String? @default("mock")
+  whatsappPhoneNumberId      String?
+  whatsappAccessToken        String?
+  whatsappBusinessAccountId  String?
+  whatsappGraphApiVersion    String? @default("v20.0")
+  whatsappWebhookVerifyToken String?
+
+  voiceProviderMode   String? @default("mock")
+  voiceProviderName   String? @default("mock")
+  voiceApiKey         String?
+  voiceAgentId        String?
+  voiceFromNumber     String?
+  voiceTransferNumber String?
+  voiceWebhookSecret  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model IntegrationConnection {
+  id        String @id @default(uuid())
+  companyId String
+
+  provider String
+  channel  ConversationChannel?
+
+  status        AgentStatus @default(NOT_CONNECTED)
+  displayName   String?
+  accountId     String?
+  phoneNumber   String?
+  webhookUrl    String?
+  mode          String?
+  lastCheckedAt DateTime?
+  lastEventAt   DateTime?
+  lastError     String?
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, provider])
+  @@index([companyId])
+  @@index([provider])
+  @@index([channel])
+  @@index([status])
+}
+
+model User {
+  id        String   @id @default(uuid())
+  companyId String
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole @default(STAFF)
+
+  isActive         Boolean   @default(true)
+  deactivatedAt    DateTime?
+  department       String?
+  jobTitle         String?
+  workloadCapacity Int       @default(8)
+  permissions      Json?
+  lastActiveAt     DateTime?
+  twoFactorEnabled Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company       Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignedTasks Task[]  @relation("TaskAssignee")
+
+  @@index([companyId])
+  @@index([role])
+  @@index([isActive])
+}
+
+model Customer {
+  id        String  @id @default(uuid())
+  companyId String
+  fullName  String?
+  phone     String
+  email     String?
+  source    String?
+
+  leadScore     Int?
+  leadStage     String?
+  lastSeenAt    DateTime?
+  lastContactAt DateTime?
+  notes         String?
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company          Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversations    Conversation[]
+  tasks            Task[]
+  bookings         Booking[]
+  outboundMessages OutboundMessage[]
+
+  @@index([companyId])
+  @@index([phone])
+  @@index([email])
+  @@index([source])
+  @@index([leadStage])
+  @@index([updatedAt])
+}
+
+model Conversation {
+  id         String  @id @default(uuid())
+  companyId  String
+  customerId String?
+
+  channel  ConversationChannel
+  status   ConversationStatus  @default(NEW)
+  priority Priority            @default(MEDIUM)
+
+  intent         String?
+  aiSummary      String?
+  nextAction     String?
+  aiConfidence   Int     @default(0)
+  humanNeeded    Boolean @default(false)
+  bookingCreated Boolean @default(false)
+
+  provider           String?
+  providerThreadId   String?
+  providerContactId  String?
+  providerExternalId String?
+
+  lastMessage   String?
+  lastMessageAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  messages         Message[]
+  calls            Call[]
+  tasks            Task[]
+  bookings         Booking[]
+  outboundMessages OutboundMessage[]
+
+  @@index([companyId])
+  @@index([customerId])
+  @@index([channel])
+  @@index([status])
+  @@index([priority])
+  @@index([humanNeeded])
+  @@index([provider])
+  @@index([providerThreadId])
+  @@index([providerExternalId])
+  @@index([createdAt])
+  @@index([updatedAt])
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  conversationId String
+  senderType     MessageSender
+  body           String
+
+  provider          String?
+  providerMessageId String?
+  providerStatus    String?
+  mediaUrl          String?
+  mediaType         String?
+  metadata          Json?
+
+  createdAt DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([senderType])
+  @@index([provider])
+  @@index([providerMessageId])
+  @@index([providerStatus])
+  @@index([createdAt])
+}
+
+model Call {
+  id             String @id @default(uuid())
+  conversationId String
+
+  phone           String
+  durationSeconds Int        @default(0)
+  transcript      String?
+  status          CallStatus @default(COMPLETED)
+
+  provider       String?
+  providerCallId String? @unique
+  direction      String? @default("INBOUND")
+
+  recordingUrl             String?
+  recordingSid             String?
+  recordingStatus          String?
+  recordingDurationSeconds Int?
+  recordingChannels        Int?
+  recordingSource          String?
+  recordingAvailableAt     DateTime?
+
+  startedAt DateTime?
+  endedAt   DateTime?
+  endReason String?
+
+  failureReason String?
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  conversation Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  postAnalysis CallPostAnalysis?
+
+  @@index([conversationId])
+  @@index([phone])
+  @@index([status])
+  @@index([provider])
+  @@index([providerCallId])
+  @@index([recordingSid])
+  @@index([createdAt])
+  @@index([updatedAt])
+}
+
+model CallPostAnalysis {
+  id        String @id @default(uuid())
+  companyId String
+  callId    String @unique
+
+  status CallPostAnalysisStatus @default(PENDING)
+
+  intentLevel CallIntentLevel?
+  intentScore Int?
+  confidence  Float?
+
+  requirementSummary String?
+  requirementDetails Json?
+  evidenceSignals    Json?
+
+  promptVersion String?
+  modelName     String?
+
+  attemptCount         Int       @default(0)
+  nextAttemptAt        DateTime?
+  processingStartedAt  DateTime?
+  completedAt          DateTime?
+  failureCode          String?
+  truncatedTranscript  Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  call    Call    @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([status, nextAttemptAt])
+  @@index([status, processingStartedAt])
+  @@index([createdAt])
+}
+
+model Task {
+  id             String  @id @default(uuid())
+  companyId      String
+  conversationId String?
+  customerId     String?
+  assignedUserId String?
+
+  title         String
+  description   String?
+  owner         String?
+  aiNotes       String?
+  blockedReason String?
+  dueAt         DateTime?
+  priority      Priority   @default(MEDIUM)
+  status        TaskStatus @default(OPEN)
+  completedAt   DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  assignedUser User?         @relation("TaskAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@index([conversationId])
+  @@index([customerId])
+  @@index([assignedUserId])
+  @@index([status])
+  @@index([priority])
+  @@index([dueAt])
+  @@index([createdAt])
+}
+
+model AiAgent {
+  id        String @id @default(cuid())
+  companyId String
+
+  name         String
+  channel      ConversationChannel
+  status       AgentStatus         @default(NOT_CONNECTED)
+  language     String?
+  instructions String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([channel])
+  @@index([status])
+}
+
+model Booking {
+  id             String  @id @default(uuid())
+  companyId      String
+  customerId     String?
+  conversationId String?
+
+  title     String
+  dateTime  DateTime?
+  status    String    @default("REQUESTED")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@index([customerId])
+  @@index([conversationId])
+  @@index([status])
+  @@index([dateTime])
+  @@index([createdAt])
+}
+
+model OutboundMessage {
+  id             String  @id @default(uuid())
+  companyId      String
+  conversationId String?
+  customerId     String?
+
+  channel ConversationChannel
+  toPhone String
+  body    String
+  status  OutboundStatus      @default(PENDING)
+
+  provider          String?
+  providerMessageId String?
+  errorMessage      String?
+  metadata          Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@index([conversationId])
+  @@index([customerId])
+  @@index([channel])
+  @@index([status])
+  @@index([toPhone])
+  @@index([provider])
+  @@index([providerMessageId])
+  @@index([createdAt])
+}
+
+model KnowledgeItem {
+  id        String @id @default(cuid())
+  companyId String
+
+  title    String
+  category String @default("GENERAL")
+  content  String
+
+  isActive Boolean @default(true)
+  enabled  Boolean @default(true)
+
+  sourceType String?
+  fileUrl    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([category])
+  @@index([isActive])
+  @@index([enabled])
+}
+
+model CrmStage {
+  id        String @id @default(uuid())
+  companyId String
+
+  name      String
+  color     String?
+  order     Int     @default(0)
+  isEnabled Boolean @default(true)
+
+  requiredFields Json?
+  automationRule Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([isEnabled])
+  @@index([order])
+}
+
+model HandoffRule {
+  id        String @id @default(uuid())
+  companyId String
+
+  name                String
+  condition           String
+  action              String
+  assignedUserId      String?
+  notificationChannel String?
+  priority            Priority @default(HIGH)
+  isEnabled           Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([isEnabled])
+  @@index([priority])
+}
+
+model NotificationRule {
+  id        String @id @default(uuid())
+  companyId String
+
+  name       String
+  event      String
+  recipients Json?
+  channels   Json?
+  quietHours Json?
+  isEnabled  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([event])
+  @@index([isEnabled])
+}
+
+model AuditLog {
+  id        String  @id @default(uuid())
+  companyId String
+  userId    String?
+
+  action     String
+  entityType String
+  entityId   String?
+  message    String
+  metadata   Json?
+
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([userId])
+  @@index([entityType])
+  @@index([createdAt])
+}
