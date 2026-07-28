@@ -132,6 +132,13 @@ type Call = {
   endedAt?: string | null;
   failureReason?: string | null;
   metadata?: Record<string, unknown> | null;
+  purpose?: string | null;
+  callObjective?: string | null;
+  collectionGoal?: string | null;
+  capturedRequirementSummary?: string | null;
+  requirementProcessingState?: string | null;
+  transcriptStatus?: string | null;
+  summary?: string | null;
   postCallAnalysis?: PostCallAnalysis | null;
   humeExpressionAnalysis?: HumeExpressionAnalysis | null;
   createdAt: string;
@@ -1055,11 +1062,25 @@ function CallRecord({
     conversation.latestCallAnalysis ||
     null;
 
-  const customerIntentText =
-    conversation.aiSummary ||
-    conversation.summary ||
-    conversation.lastMessage ||
+  const callObjective =
+    call?.callObjective ||
+    call?.collectionGoal ||
+    call?.purpose ||
+    (typeof call?.metadata?.collectionGoal === "string"
+      ? call.metadata.collectionGoal
+      : "") ||
     "";
+
+  const aiSummaryText =
+    (call?.summary &&
+    normalizeText(call.summary) !== normalizeText(callObjective)
+      ? call.summary
+      : "") ||
+    (conversation.aiSummary &&
+    normalizeText(conversation.aiSummary) !== normalizeText(callObjective) &&
+    !/scheduled ai call/i.test(conversation.aiSummary)
+      ? conversation.aiSummary
+      : "");
   const recordingUiState = resolveRecordingUiState(call);
   const analysisView = toPostCallAnalysisView(analysis);
 
@@ -1108,21 +1129,33 @@ function CallRecord({
 
       <div className="p-6 md:p-8">
         <div className="overflow-hidden rounded-[30px] border border-white/10 bg-black/18">
-          <RecordRow label="Customer Intent" icon={<Sparkles size={18} />}>
+          <RecordRow label="Call objective" icon={<FileText size={18} />}>
+            <div className="max-w-4xl">
+              {callObjective ? (
+                <p className="text-[15px] leading-8 text-white/68">{callObjective}</p>
+              ) : (
+                <MutedText>No call objective recorded.</MutedText>
+              )}
+            </div>
+          </RecordRow>
+
+          <RecordRow label="AI summary" icon={<Sparkles size={18} />}>
             <CustomerIntentBlock
               conversation={conversation}
               analysis={analysis}
-              outcome={customerIntentText}
+              outcome={aiSummaryText}
             />
           </RecordRow>
 
-          <RecordRow label="Lead Requirements" icon={<Check size={18} />}>
+          <RecordRow label="Customer requirements" icon={<Check size={18} />}>
             <LeadRequirementsBlock
               conversation={conversation}
+              call={call}
               analysis={analysis}
               requirementSummary={requirementSummary}
               requirements={requirements}
-              customerIntentText={customerIntentText}
+              customerIntentText={aiSummaryText}
+              callObjective={callObjective}
             />
           </RecordRow>
 
@@ -1162,7 +1195,8 @@ function CallRecord({
         <div className="mt-6 grid gap-4">
           <RequirementsPanel
             analysis={analysisView}
-            fallbackSummary={requirementSummary || customerIntentText}
+            processingState={call?.requirementProcessingState}
+            capturedSummary={call?.capturedRequirementSummary}
           />
           <BusinessIntentPanel analysis={analysisView} />
           <HumeInsightsPanel analysis={call?.humeExpressionAnalysis || null} />
@@ -1256,21 +1290,35 @@ function CustomerIntentBlock({
 
 function LeadRequirementsBlock({
   conversation,
+  call,
   analysis,
   requirementSummary,
   requirements,
   customerIntentText,
+  callObjective,
 }: {
   conversation: CallConversation;
+  call: Call | null;
   analysis: PostCallAnalysis | null;
   requirementSummary: string;
   requirements: string[];
   customerIntentText: string;
+  callObjective: string;
 }) {
   const details = analysis?.requirementDetails || null;
   const summaryIsRepeated =
     normalizeText(requirementSummary) !== "" &&
-    normalizeText(requirementSummary) === normalizeText(customerIntentText);
+    (normalizeText(requirementSummary) === normalizeText(customerIntentText) ||
+      normalizeText(requirementSummary) === normalizeText(callObjective));
+
+  const processing =
+    call?.requirementProcessingState === "PROCESSING" ||
+    call?.transcriptStatus === "PENDING" ||
+    analysis?.analysisStatus === "PENDING";
+
+  if (processing && !requirementSummary && requirements.length === 0) {
+    return <MutedText>Requirements processing</MutedText>;
+  }
 
   const information = [
     { label: "Primary need", value: details?.primaryNeed },
@@ -1293,7 +1341,7 @@ function LeadRequirementsBlock({
     Boolean(recommendedNextStep);
 
   if (!hasContent) {
-    return <MutedText>No structured lead requirements were captured.</MutedText>;
+    return <MutedText>No requirements captured</MutedText>;
   }
 
   return (
@@ -1301,7 +1349,7 @@ function LeadRequirementsBlock({
       {requirementSummary && !summaryIsRepeated ? (
         <div className="rounded-[26px] border border-emerald-400/15 bg-emerald-400/[0.07] p-5">
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-100/65">
-            What the customer needs
+            Customer requirements
           </p>
           <p className="mt-3 text-[15px] leading-8 text-white/68">
             {requirementSummary}
@@ -2363,12 +2411,26 @@ function getRequirementSummary(
   if (!conversation) return "";
 
   const analysis = call?.postCallAnalysis || conversation.latestCallAnalysis;
+  const objective =
+    call?.callObjective ||
+    call?.collectionGoal ||
+    call?.purpose ||
+    (typeof call?.metadata?.collectionGoal === "string"
+      ? call.metadata.collectionGoal
+      : "");
+
+  if (call?.capturedRequirementSummary) {
+    return call.capturedRequirementSummary;
+  }
+
+  const summary = analysis?.requirementSummary || "";
+  if (summary && objective && normalizeText(summary) === normalizeText(objective)) {
+    return "";
+  }
 
   return (
-    analysis?.requirementSummary ||
+    summary ||
     conversation.leadRequirements?.summary ||
-    conversation.tasks?.find((task) => task.leadRequirements?.summary)
-      ?.leadRequirements?.summary ||
     ""
   );
 }

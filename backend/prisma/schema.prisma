@@ -534,8 +534,23 @@ model HumeToolCallReceipt {
   toolName   String
   status     String
   error      String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+
+  responseRequired       Boolean  @default(true)
+  businessStatus         String   @default("PENDING")
+  deliveryStatus         String   @default("PENDING")
+  deliveryAttempts       Int      @default(0)
+  receivedAt             DateTime @default(now())
+  executionStartedAt     DateTime?
+  executionCompletedAt   DateTime?
+  responseSendStartedAt  DateTime?
+  responseAcceptedAt     DateTime?
+  /// Bounded Tool Response / Tool Error payload for safe redelivery (never log raw).
+  responsePayload        Json?
+  errorCategory          String?
+  lastDeliveryError      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
 
@@ -543,6 +558,25 @@ model HumeToolCallReceipt {
   @@index([callId])
   @@index([companyId])
   @@index([toolName])
+  @@index([deliveryStatus])
+  @@index([businessStatus])
+}
+
+model HumeCallContextCache {
+  id        String   @id @default(uuid())
+  callId    String
+  companyId String
+  chatId    String?
+  /// Bounded context snapshot; never contains secrets.
+  payload   Json
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, callId])
+  @@index([chatId])
+  @@index([expiresAt])
+  @@index([companyId])
 }
 
 model HumeChatSyncJob {

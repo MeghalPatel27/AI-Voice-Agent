@@ -173,7 +173,7 @@ describe("Call insight panels", () => {
     const { rerender } = render(
       <HumeInsightsPanel analysis={sampleConversation.calls[0].humeExpressionAnalysis} />,
     );
-    expect(screen.getByText(/Hume conversation insights/i)).toBeInTheDocument();
+    expect(screen.getByText(/Hume voice insights/i)).toBeInTheDocument();
     expect(screen.getByText(/Interest: 71%/i)).toBeInTheDocument();
     expect(
       screen.getByText(/not buying intent/i),
@@ -285,7 +285,7 @@ describe("CallsPage", () => {
     expect(screen.getAllByText(/Customer wants a redesigned marketing site/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Website redesign with booking/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText("High interest").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Hume conversation insights/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Hume voice insights/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/State: Hume/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Transcript is collapsed/i).length).toBeGreaterThan(0);
   });

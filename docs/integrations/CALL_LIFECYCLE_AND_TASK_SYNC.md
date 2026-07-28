@@ -1,3 +1,8 @@
+## Meeting linkage expectations
+
+- A call is linked to a meeting only when a booking row exists.
+- Transcript text or verbal confirmation alone must never mark `bookingCreated=true`.
+- When reconciliation finds terminal calls with missing post-call jobs, those jobs can be safely enqueued without reopening terminal tasks.
 # Call Lifecycle and Task Sync
 
 ## Purpose
@@ -62,8 +67,8 @@ There is no separate Task `FAILED` / `CANCELED` enum. Non-success call outcomes 
 
 | Event | Behavior |
 |-------|----------|
-| `chat_started` | Attach `humeChatId` to Call by Twilio SID, or create inbound Conversation+Call; status → `IN_PROGRESS` when allowed; store `metadata.answeredAt` |
-| `tool_call` | Idempotent tool receipt handling |
+| `chat_started` | Attach `humeChatId` to Call by Twilio SID, or create inbound Conversation+Call; status → `IN_PROGRESS` when allowed; store `metadata.answeredAt`; asynchronously prewarm call context cache |
+| `tool_call` | Canonical dispatcher: idempotent business execution once; Control Plane Tool Response/Error with exact `tool_call_id`; race-safe resolve via chat id or verified Twilio SID |
 | `chat_ended` | Persist `humeEndReason`, enqueue sync, **finalize Call + Task** without forcing success over an existing non-success Twilio terminal |
 | `hang_up` tool | Intention only; terminalization waits for verified `chat_ended` and/or Twilio terminal callback |
 

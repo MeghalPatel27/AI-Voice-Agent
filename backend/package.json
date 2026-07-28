@@ -18,6 +18,7 @@
     "prisma:migrate:dev": "prisma migrate dev",
     "hume:validate-config": "tsx scripts/humeValidateConfig.ts",
     "hume:configure": "tsx scripts/humeConfigure.ts",
+    "hume:reconcile-tool-responses": "tsx scripts/reconcileHumeToolResponses.ts",
     "twilio:validate-config": "tsx scripts/twilioValidateConfig.ts",
     "twilio:verify-webhook": "tsx scripts/verifyTwilioWebhook.ts",
     "db:audit": "tsx scripts/dbAudit.ts",
@@ -26,7 +27,9 @@
     "db:rotate-secrets": "tsx scripts/rotateDevSecrets.ts",
     "db:backfill-hume-metadata": "tsx scripts/backfillHumeMetadata.ts",
     "dev:verify-scheduled-call-context": "tsx scripts/verifyScheduledCallContext.ts",
-    "calls:reconcile": "tsx scripts/reconcileCallLifecycle.ts"
+    "calls:reconcile": "tsx scripts/reconcileCallLifecycle.ts",
+    "hume:reconcile-chat-history": "tsx scripts/reconcileHumeChatHistory.ts",
+    "meetings:reconcile-hume": "tsx scripts/reconcileHumeMeetings.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
@@ -37,6 +40,7 @@
     "express": "^5.2.1",
     "hume": "^0.16.0",
     "jsonwebtoken": "^9.0.3",
+    "luxon": "^3.7.2",
     "pg": "^8.22.0",
     "twilio": "^5.13.1",
     "ws": "^8.21.0",
@@ -47,6 +51,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/luxon": "^3.7.2",
     "@types/node": "^26.1.0",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",

@@ -34,6 +34,9 @@ import {
   startHumeSyncWorker,
   stopHumeSyncWorker,
 } from "./integrations/hume/humeSyncWorker.service";
+import { assertHumeToolRuntimeConfig } from "./integrations/hume/humeToolRuntime.config";
+
+assertHumeToolRuntimeConfig();
 
 const app = express();
 

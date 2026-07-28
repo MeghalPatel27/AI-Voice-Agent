@@ -10,11 +10,13 @@ import {
   validateRemoteToolSchemas,
 } from "../src/integrations/hume/humeToolSchemas";
 import {
+  HUME_SYSTEM_PROMPT_CHAR_COUNT,
   HUME_SYSTEM_PROMPT_CHECKSUM,
   HUME_SYSTEM_PROMPT_TEXT,
   HUME_SYSTEM_PROMPT_VERSION,
   computePromptChecksum,
 } from "../src/integrations/hume/humeSystemPrompt";
+import { HUME_LATENCY_TARGETS } from "../src/integrations/hume/humeLatencyTargets";
 
 type RemoteTool = {
   id: string;
@@ -92,6 +94,10 @@ async function listAllTools(): Promise<RemoteTool[]> {
   }));
 }
 
+/** Target latency settings imported from shared module. */
+// Re-export for script consumers.
+export { HUME_LATENCY_TARGETS } from "../src/integrations/hume/humeLatencyTargets";
+
 function buildConfigVersionBody(remote: any, toolSpecs: Array<{ id: string; version: number }>) {
   const prompt = remote?.prompt;
   const voice = remote?.voice;
@@ -103,9 +109,52 @@ function buildConfigVersionBody(remote: any, toolSpecs: Array<{ id: string; vers
     fallback_content: tool?.fallback_content ?? null,
   }));
 
+  const remoteEventMessages = remote?.event_messages || {};
+  const remoteTimeouts = remote?.timeouts || {};
+
+  const turnDetection = {
+    end_of_turn_silence_ms: HUME_LATENCY_TARGETS.endOfTurnSilenceMs,
+    prefix_padding_ms: HUME_LATENCY_TARGETS.prefixPaddingMs,
+    speech_detection_threshold: HUME_LATENCY_TARGETS.speechDetectionThreshold,
+  };
+
+  const interruption = {
+    min_interruption_ms: HUME_LATENCY_TARGETS.minInterruptionMs,
+  };
+
+  const eventMessages = {
+    on_new_chat: {
+      enabled: true,
+      text: HUME_LATENCY_TARGETS.onNewChatText,
+    },
+    on_resume_chat: remoteEventMessages.on_resume_chat ?? {
+      enabled: false,
+      text: null,
+    },
+    on_inactivity_timeout: {
+      enabled: true,
+      text: HUME_LATENCY_TARGETS.inactivityMessage,
+    },
+    on_max_duration_timeout: remoteEventMessages.on_max_duration_timeout ?? {
+      enabled: false,
+      text: null,
+    },
+  };
+
+  const timeouts = {
+    inactivity: {
+      enabled: true,
+      duration_secs: HUME_LATENCY_TARGETS.inactivityTimeoutSecs,
+    },
+    max_duration: remoteTimeouts.max_duration ?? {
+      enabled: true,
+      duration_secs: 1800,
+    },
+  };
+
   return {
     evi_version: String(remote?.evi_version || "3"),
-    version_description: "Attach corrected AiraDesk tool schemas",
+    version_description: `AiraDesk latency+recovery ${HUME_SYSTEM_PROMPT_VERSION}`,
     prompt: prompt?.id
       ? {
           id: prompt.id,
@@ -133,14 +182,14 @@ function buildConfigVersionBody(remote: any, toolSpecs: Array<{ id: string; vers
       : undefined,
     ellm_model: ellmModel
       ? {
-          allow_short_responses: ellmModel.allow_short_responses ?? null,
+          allow_short_responses: true,
         }
-      : undefined,
-    event_messages: remote?.event_messages ?? undefined,
-    timeouts: remote?.timeouts ?? undefined,
-    nudges: remote?.nudges ?? undefined,
-    turn_detection: remote?.turn_detection ?? undefined,
-    interruption: remote?.interruption ?? undefined,
+      : { allow_short_responses: true },
+    event_messages: eventMessages,
+    timeouts,
+    nudges: remote?.nudges ?? { enabled: false, interval_secs: null },
+    turn_detection: turnDetection,
+    interruption,
     webhooks: webhooks.map((webhook: any) => ({
       url: webhook.url,
       events: webhook.events,
@@ -204,25 +253,61 @@ async function main() {
     updatedToolVersions.set(attached.id, attached.version);
   }
 
+  const proposedBody = buildConfigVersionBody(
+    remote,
+    attachedTools.map((tool) => ({
+      id: tool.id,
+      version: updatedToolVersions.get(tool.id) ?? tool.version,
+    })),
+  );
+  const remotePromptText = readRemotePromptText(remote);
   const dryRunReport = {
     mode: apply ? "apply" : "dry-run",
     configId: config.configId,
+    configIdPreserved: true,
     configName: remote?.name ?? null,
     configVersionBefore,
+    configVersionAfterProposed: "new_version_on_apply",
     promptVersionBefore: remote?.prompt?.version ?? null,
-    promptChecksumBefore: computePromptChecksum(readRemotePromptText(remote)),
     promptVersionAfter: HUME_SYSTEM_PROMPT_VERSION,
+    promptCharCountBefore: remotePromptText.length,
+    promptCharCountAfter: HUME_SYSTEM_PROMPT_CHAR_COUNT,
+    promptChecksumBefore: computePromptChecksum(remotePromptText),
     promptChecksumAfter: HUME_SYSTEM_PROMPT_CHECKSUM,
-    promptChanged: computePromptChecksum(readRemotePromptText(remote)) !== HUME_SYSTEM_PROMPT_CHECKSUM,
+    promptChanged: computePromptChecksum(remotePromptText) !== HUME_SYSTEM_PROMPT_CHECKSUM,
+    endOfTurnSilenceMsBefore: remote?.turn_detection?.end_of_turn_silence_ms ?? null,
+    endOfTurnSilenceMsAfter: proposedBody.turn_detection.end_of_turn_silence_ms,
+    speechDetectionThresholdBefore:
+      remote?.turn_detection?.speech_detection_threshold ?? null,
+    speechDetectionThresholdAfter:
+      proposedBody.turn_detection.speech_detection_threshold,
+    prefixPaddingMsBefore: remote?.turn_detection?.prefix_padding_ms ?? null,
+    prefixPaddingMsAfter: proposedBody.turn_detection.prefix_padding_ms,
+    minInterruptionMsBefore: remote?.interruption?.min_interruption_ms ?? null,
+    minInterruptionMsAfter: proposedBody.interruption.min_interruption_ms,
+    quickResponsesBefore: remote?.ellm_model?.allow_short_responses ?? null,
+    quickResponsesAfter: proposedBody.ellm_model.allow_short_responses,
+    inactivityTimeoutSecsBefore: remote?.timeouts?.inactivity?.duration_secs ?? null,
+    inactivityTimeoutSecsAfter: proposedBody.timeouts.inactivity.duration_secs,
+    inactivityMessageBefore: remote?.event_messages?.on_inactivity_timeout ?? null,
+    inactivityMessageAfter: proposedBody.event_messages.on_inactivity_timeout,
+    voicePreserved: proposedBody.voice?.name === "Kora" || proposedBody.voice?.name === remote?.voice?.name,
+    modelPreserved: proposedBody.language_model?.model_resource === "gpt-4o",
+    toolsPreserved: attachedTools.map((tool) => tool.name),
+    webhooksPreserved: (proposedBody.webhooks || []).map((webhook: any) => ({
+      events: webhook.events,
+      urlHost: (() => {
+        try {
+          return new URL(webhook.url).host;
+        } catch {
+          return "invalid";
+        }
+      })(),
+    })),
+    hangupPreserved: (proposedBody.builtin_tools || []).some((tool: any) => tool.name === "hang_up"),
     duplicateToolNames: duplicateNames,
     toolDiffs: diffs,
-    configVersionBodyPreview: buildConfigVersionBody(
-      remote,
-      attachedTools.map((tool) => ({
-        id: tool.id,
-        version: updatedToolVersions.get(tool.id) ?? tool.version,
-      })),
-    ),
+    configVersionBodyPreview: proposedBody,
   };
 
   if (!apply) {
@@ -245,7 +330,6 @@ async function main() {
   }
 
   let promptRef = remote?.prompt;
-  const remotePromptText = readRemotePromptText(remote);
   if (
     promptRef?.id &&
     computePromptChecksum(remotePromptText) !== HUME_SYSTEM_PROMPT_CHECKSUM

@@ -372,10 +372,44 @@ function withCallApiFields<
     id: string;
     recordingUrl?: string | null;
     recordingSid?: string | null;
+    recordingReconstructionStatus?: string | null;
+    purpose?: string | null;
+    metadata?: unknown;
+    transcriptSyncStatus?: string | null;
+    humeSyncStatus?: string | null;
+    expressionAnalysisStatus?: string | null;
+    humeExpressionAnalysis?: unknown;
     postAnalysis?: unknown;
   },
 >(call: T) {
-  return withPostCallAnalysis(withRecordingMediaUrl(call));
+  const meta = (call.metadata as Record<string, unknown> | null) || {};
+  const collectionGoal =
+    (typeof call.purpose === "string" && call.purpose) ||
+    (typeof meta.collectionGoal === "string" ? meta.collectionGoal : null);
+  const capturedRequirementSummary =
+    typeof meta.capturedRequirementSummary === "string"
+      ? meta.capturedRequirementSummary
+      : null;
+
+  return withPostCallAnalysis({
+    ...withRecordingMediaUrl(call),
+    callObjective: collectionGoal,
+    collectionGoal,
+    requirementProcessingState:
+      call.transcriptSyncStatus === "COMPLETED" &&
+      !call.postAnalysis &&
+      !capturedRequirementSummary
+        ? "PROCESSING"
+        : call.transcriptSyncStatus === "PENDING"
+          ? "PROCESSING"
+          : null,
+    capturedRequirementSummary,
+    humeVoiceInsights: call.humeExpressionAnalysis || null,
+    transcriptStatus: call.transcriptSyncStatus || "PENDING",
+    humeSyncStatus: call.humeSyncStatus || "PENDING",
+    expressionAnalysisStatus: call.expressionAnalysisStatus || "PENDING",
+    recordingStatusLabel: call.recordingReconstructionStatus || "NOT_REQUESTED",
+  });
 }
 
 function withConversationRecordingUrls<

@@ -158,6 +158,27 @@ async function main() {
     (event) => !webhookEvents.includes(event),
   );
 
+  const remotePromptText = String(remote?.prompt?.text || remote?.system_prompt || "");
+  const turnDetection = remote?.turn_detection || {};
+  const interruption = remote?.interruption || {};
+  const ellm = remote?.ellm_model || {};
+  const eventMessages = remote?.event_messages || {};
+  const timeouts = remote?.timeouts || {};
+
+  const latencyChecks = {
+    endOfTurnSilenceMs: turnDetection.end_of_turn_silence_ms === 500,
+    prefixPaddingMs: turnDetection.prefix_padding_ms === 300,
+    speechDetectionThreshold: turnDetection.speech_detection_threshold === 0.45,
+    minInterruptionMs: interruption.min_interruption_ms === 300,
+    quickResponsesEnabled: ellm.allow_short_responses === true,
+    inactivityMessageEnabled:
+      eventMessages?.on_inactivity_timeout?.enabled === true &&
+      /still there/i.test(String(eventMessages?.on_inactivity_timeout?.text || "")),
+    inactivityTimeoutSecs: timeouts?.inactivity?.duration_secs === 30,
+    voiceIsKora: String(remote?.voice?.name || "") === "Kora",
+    modelIsGpt4o: String(remote?.language_model?.model_resource || "") === "gpt-4o",
+  };
+
   const report = {
     promptVersionExpected: HUME_SYSTEM_PROMPT_VERSION,
     promptChecksumExpected: HUME_SYSTEM_PROMPT_CHECKSUM,
@@ -165,7 +186,8 @@ async function main() {
       missingEvents.length === 0 &&
       toolIssues.length === 0 &&
       hangupEnabled &&
-      Boolean(webhook?.url || webhook?.callback_url)
+      Boolean(webhook?.url || webhook?.callback_url) &&
+      Object.values(latencyChecks).every(Boolean)
         ? "passed"
         : "failed",
     configExists: true,
@@ -177,12 +199,9 @@ async function main() {
     humePromptRemoteVersion: remote?.prompt?.version ?? null,
     localCanonicalPromptVersion: HUME_SYSTEM_PROMPT_VERSION,
     localCanonicalPromptChecksum: HUME_SYSTEM_PROMPT_CHECKSUM,
-    remotePromptChecksum: computePromptChecksum(
-      String(remote?.prompt?.text || remote?.system_prompt || ""),
-    ),
+    remotePromptChecksum: computePromptChecksum(remotePromptText),
     promptChecksumMatch:
-      computePromptChecksum(String(remote?.prompt?.text || remote?.system_prompt || "")) ===
-      HUME_SYSTEM_PROMPT_CHECKSUM,
+      computePromptChecksum(remotePromptText) === HUME_SYSTEM_PROMPT_CHECKSUM,
     voiceNameOrId:
       remote?.voice?.name ||
       remote?.voice?.id ||
@@ -198,42 +217,51 @@ async function main() {
       null,
     languageProvider:
       remote?.language_model?.provider ||
+      remote?.language_model?.model_provider ||
       remote?.ellm_model?.provider ||
       remote?.model?.provider ||
       null,
-    promptPresent: Boolean(remote?.prompt?.text || remote?.system_prompt),
+    promptPresent: Boolean(remotePromptText),
     promptRules: {
-      contextToolInstruction: /airadesk_get_call_context/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
-      collectionGoalInstruction: /collectionGoal/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
-      privateNoteInstruction: /extraNotes|private note/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
-      nonDeceptionInstruction: /never claim to be human|impersonate/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
+      contextToolInstruction: /airadesk_get_call_context/i.test(remotePromptText),
+      collectionGoalInstruction: /collectionGoal/i.test(remotePromptText),
+      privateNoteInstruction: /extraNotes|private note/i.test(remotePromptText),
+      nonDeceptionInstruction: /never claim to be human|impersonate/i.test(remotePromptText),
       truthfulAiAnswerInstruction: /AI-powered virtual calling assistant/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
+        remotePromptText,
       ),
-      companyPurposeOpeningInstruction: /outbound calls.*company name.*reason/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      companyPurposeOpeningInstruction: /outbound.*company name.*reason/i.test(
+        remotePromptText,
       ),
-      leadCaptureInstruction: /airadesk_capture_lead_details/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      leadCaptureInstruction: /airadesk_capture_lead_details/i.test(remotePromptText),
+      meetingToolInstruction: /airadesk_schedule_meeting/i.test(remotePromptText),
+      optOutInstruction: /opt-?out|not to contact/i.test(remotePromptText),
+      hangupInstruction: /hang_up/i.test(remotePromptText),
+      currentDateVariable: /\{\{now\}\}/.test(remotePromptText),
+      defaultTimezoneRule: /Asia\/Kolkata/i.test(remotePromptText),
+      relativeDateRule: /tomorrow/i.test(remotePromptText),
+      exactConfirmationRule: /confirm the exact calendar date/i.test(remotePromptText),
+      voicePaceInstruction: /VOICE AND RESPONSE STYLE|brisk, natural professional pace/i.test(
+        remotePromptText,
       ),
-      meetingToolInstruction: /airadesk_schedule_meeting/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
-      optOutInstruction: /opt-?out|not to contact/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
-      hangupInstruction: /hang_up/i.test(
-        String(remote?.prompt?.text || remote?.system_prompt || ""),
-      ),
+      shortResponseInstruction: /25 spoken words/i.test(remotePromptText),
+      oneQuestionInstruction: /one question at a time/i.test(remotePromptText),
+      toolFailureRecoveryInstruction:
+        /Never remain silent indefinitely waiting for an internal tool/i.test(
+          remotePromptText,
+        ),
+      silenceRecoveryInstruction: /Hello, are you there\?/i.test(remotePromptText),
     },
+    latencySettings: {
+      end_of_turn_silence_ms: turnDetection.end_of_turn_silence_ms ?? null,
+      prefix_padding_ms: turnDetection.prefix_padding_ms ?? null,
+      speech_detection_threshold: turnDetection.speech_detection_threshold ?? null,
+      min_interruption_ms: interruption.min_interruption_ms ?? null,
+      allow_short_responses: ellm.allow_short_responses ?? null,
+      inactivity_timeout_secs: timeouts?.inactivity?.duration_secs ?? null,
+      inactivity_message_enabled: eventMessages?.on_inactivity_timeout?.enabled ?? null,
+    },
+    latencyChecks,
     webhookConfigured: Boolean(webhook?.url || webhook?.callback_url),
     webhookDestination: redactWebhookUrl(
       String(webhook?.url || webhook?.callback_url || ""),

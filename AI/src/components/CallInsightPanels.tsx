@@ -41,22 +41,22 @@ function requirementChips(analysis?: PostCallAnalysisView | null): string[] {
 
 export function RequirementsPanel({
   analysis,
-  fallbackSummary,
+  processingState,
+  capturedSummary,
 }: {
   analysis?: PostCallAnalysisView | null;
-  fallbackSummary?: string | null;
+  processingState?: string | null;
+  capturedSummary?: string | null;
 }) {
   const chips = requirementChips(analysis);
-  const display = chips.length
-    ? chips
-    : fallbackSummary
-      ? [fallbackSummary]
-      : [];
+  const display = chips.length ? chips : capturedSummary ? [capturedSummary] : [];
 
   return (
     <Panel title="Customer requirements" icon={<Target size={20} aria-hidden />}>
-      {display.length === 0 ? (
-        <p className="text-sm text-white/40">No structured requirements captured yet.</p>
+      {processingState === "PROCESSING" && display.length === 0 ? (
+        <p className="text-sm text-white/40">Requirements processing</p>
+      ) : display.length === 0 ? (
+        <p className="text-sm text-white/40">No requirements captured</p>
       ) : (
         <div className="flex flex-wrap gap-2" aria-label="Customer requirements">
           {display.map((chip) => (
@@ -143,7 +143,7 @@ export function HumeInsightsPanel({
     : [];
 
   return (
-    <Panel title="Hume conversation insights" icon={<Sparkles size={20} aria-hidden />}>
+    <Panel title="Hume voice insights" icon={<Sparkles size={20} aria-hidden />}>
       {!analysis ? (
         <p className="text-sm text-white/40">
           Expression insights will appear after Hume chat sync completes.

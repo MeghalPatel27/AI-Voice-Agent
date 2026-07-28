@@ -1,3 +1,8 @@
+## Scheduling truthfulness rule
+
+- The agent must only confirm a meeting after a successful `airadesk_schedule_meeting` tool response.
+- `tool_call` webhook acknowledgement and `FUNCTION_CALL` chat events do not mean booking success.
+- Prompt variable `{{now}}` must be present so relative dates are resolved from current runtime context.
 # Hume EVI Setup (Twilio Telephony + AiraDesk CRM)
 
 ## Required Environment Variables
@@ -11,6 +16,11 @@
 - `TWILIO_PHONE_NUMBER`
 - `PUBLIC_WEBHOOK_URL`
 - `VOICE_COMPANY_ID`
+- `HUME_TOOL_EXECUTION_TIMEOUT_MS` (default `1500`)
+- `HUME_CONTROL_PLANE_TIMEOUT_MS` (default `1500`)
+- `HUME_TOOL_DELIVERY_MAX_ATTEMPTS` (default `3`)
+- `HUME_TOOL_DELIVERY_RETRY_BASE_MS` (default `200`)
+- `HUME_CONTEXT_CACHE_TTL_SECONDS` (default `120`)
 
 ## Where Values Come From
 - Hume keys/config from Hume dashboard (EVI config + API keys).
@@ -156,14 +166,56 @@ Do not describe `humePromptRemoteVersion` or `localCanonicalPromptVersion` as "c
   - `HUME_SYSTEM_PROMPT_TEXT`
   - `HUME_SYSTEM_PROMPT_VERSION`
   - `HUME_SYSTEM_PROMPT_CHECKSUM`
+  - `HUME_SYSTEM_PROMPT_CHAR_COUNT`
+- Hard fail when prompt exceeds 7,000 characters.
+- Target: under 6,500 characters. Current concise prompt starts with **VOICE AND RESPONSE STYLE** (brisk pace, ~25 spoken words, one question per turn).
 - The prompt is global behavior only. Company details and call objectives are injected dynamically via `airadesk_get_call_context`.
 - Do not hardcode tenant company names or customer data in this global prompt.
 
 ## Prompt Responsibilities vs Call Objective
 
-- Global prompt controls: identity/disclosure, safety, tool sequencing, opt-out behavior, non-deception, and hang-up policy.
+- Global prompt controls: identity/disclosure, opening/turn-taking, safety, tool sequencing, opt-out behavior, non-deception, hang-up policy, silence recovery, and tool-failure fallback.
 - Call objective controls: `collectionGoal`, `callPurpose`, `extraNotes`, language, schedule details.
 - Changing one scheduled call objective must not require global prompt edits.
+- Dashboard **"What should AI collect"** only applies to **scheduled outbound** tasks. Direct inbound calls to the Twilio number use inbound discovery context from `airadesk_get_call_context` (or a soft company fallback if chat mapping is still linking).
+- The agent must keep speaking if context is delayed; it must not go silent waiting on tools.
+- One allowed silence check-in: "Hello, are you there?" — do not repeat.
+
+## Tool Response vs Webhook Acknowledgement
+
+- HTTP 200 from `/api/webhooks/hume/evi` only acknowledges receipt.
+- `response_required: true` custom tools must send Control Plane `tool_response` or `tool_error` to `/v0/evi/chat/:chat_id/send` with the exact `tool_call_id`.
+- Canonical dispatcher: `backend/src/integrations/hume/humeToolDispatcher.service.ts`
+- Delivery metadata lives on `HumeToolCallReceipt` (attempts, timestamps, bounded `responsePayload`).
+- Reconcile undelivered results: `npm run hume:reconcile-tool-responses -- --dry-run` (default) / `--apply`.
+
+## Context Prewarming
+
+- On verified `chat_started`, AiraDesk asynchronously prewarms `buildAiradeskCallContext` into tenant-scoped `HumeCallContextCache` (short TTL).
+- `airadesk_get_call_context` prefers cache, falls back to DB builder, and times out ≤1.5s with Tool Error + discovery fallback.
+
+## Latency / Turn Settings (configure targets)
+
+Applied via `npm run hume:configure` without changing config ID, voice (Kora), model (GPT-4o), tools, or webhook URL:
+
+| Setting | Target |
+|---------|--------|
+| `turn_detection.end_of_turn_silence_ms` | 500 |
+| `turn_detection.prefix_padding_ms` | 300 |
+| `turn_detection.speech_detection_threshold` | 0.45 (tuned after missed-speech stall; more false activations possible) |
+| `interruption.min_interruption_ms` | 300 |
+| `ellm_model.allow_short_responses` | true |
+| `timeouts.inactivity.duration_secs` | 30 (Hume API minimum; 12–15s not supported) |
+| `event_messages.on_inactivity_timeout` | "Hello, are you still there?" |
+| `event_messages.on_new_chat` | "Hello?" |
+
+GPT-4o is intentionally unchanged. Faster model candidates are documented only in `humeLanguageModel.ts`.
+
+## Troubleshooting “Hello?” then silence
+
+See `docs/integrations/HUME_RESPONSE_LATENCY_AND_STALLS.md` for the verified event timeline and root-cause matrix.
+
+Operational prerequisite: the public webhook host must be reachable. A 404/offline tunnel leaves Calls without `humeChatId` and prevents custom-tool completion.
 
 ## Hume Data Retention Confirmation
 

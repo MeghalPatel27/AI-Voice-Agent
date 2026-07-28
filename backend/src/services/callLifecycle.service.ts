@@ -21,6 +21,11 @@ import {
   type ScheduledCallContext,
 } from "./aiScheduledCallContext";
 import { enqueueHumeSyncJob } from "../integrations/hume/humeChatSync.service";
+import { getHumeChat } from "../integrations/hume/humeChatHistory.client";
+import {
+  findCallByTwilioSid,
+  persistHumeChatCorrelation,
+} from "../integrations/hume/humeChatCorrelation.service";
 
 export type LifecycleSource = "TWILIO" | "HUME" | "RECONCILER" | "SYNC" | "SYSTEM";
 
@@ -692,10 +697,39 @@ export async function applyHumeChatEndedLifecycle(input: {
   endReason?: string | null;
   endTimestamp?: number | null;
 }): Promise<LifecycleTransitionResult> {
-  const call = await prisma.call.findFirst({
+  let call = await prisma.call.findFirst({
     where: { humeChatId: input.chatId },
     include: { conversation: true },
   });
+
+  if (!call) {
+    try {
+      const chat = await getHumeChat(input.chatId);
+      if (chat.twilioCallSid) {
+        call = await findCallByTwilioSid(chat.twilioCallSid);
+        if (call) {
+          await persistHumeChatCorrelation({
+            callId: call.id,
+            chat,
+            evidence: {
+              method: "twilio_call_sid",
+              twilioCallSid: chat.twilioCallSid,
+              configIdMatch: true,
+              timestampDeltaMs: null,
+              chatStartMs: chat.startTimestampMs,
+              callStartMs: (call.startedAt || call.createdAt).getTime(),
+            },
+          });
+          call = await prisma.call.findFirst({
+            where: { id: call.id },
+            include: { conversation: true },
+          });
+        }
+      }
+    } catch {
+      // fail closed below
+    }
+  }
 
   if (!call) {
     return {

@@ -1,8 +1,21 @@
 import { prisma } from "../../db/prisma";
 import { finalizeCall } from "../../services/callFinalization.service";
-import { listHumeChatEvents } from "./hume.client";
-import type { HumeChatEvent } from "./hume.types";
-import type { MessageSender } from "@prisma/client";
+import { enqueuePostCallProcessing } from "../../services/callLifecycle.service";
+import {
+  persistHumeChatCorrelation,
+  resolveHumeChatForCall,
+} from "./humeChatCorrelation.service";
+import {
+  fetchAllHumeChatEvents,
+  requestHumeChatAudio,
+} from "./humeChatHistory.client";
+import {
+  buildTranscriptText,
+  computeExpressionAnalysis,
+  countEventTypes,
+  eventToTranscriptLine,
+} from "./humeChatTranscript.service";
+import { queueHumeAudioPoll } from "./humeAudioReconstruction.service";
 
 function getStaleProcessingMs() {
   const raw = Number(process.env.HUME_SYNC_WORKER_STALE_PROCESSING_MS || 120000);
@@ -24,38 +37,6 @@ async function recoverStaleProcessingJobs() {
     },
   });
   return recovered.count;
-}
-
-function eventToMessage(event: HumeChatEvent) {
-  const role = event.message?.role || event.role;
-  const body = String(event.message?.content || "").trim();
-  if (!body) return null;
-  if (role === "system") return null;
-  if (role !== "user" && role !== "assistant") return null;
-  return {
-    senderType: (role === "user" ? "CUSTOMER" : "AI") as MessageSender,
-    body,
-    providerMessageId: String(event.id || ""),
-    createdAt: event.message?.timestamp ? new Date(event.message.timestamp * 1000) : new Date(),
-  };
-}
-
-function parseEmotionFeatures(raw: unknown): Record<string, number> {
-  if (!raw) return {};
-  if (typeof raw === "string") {
-    try {
-      return parseEmotionFeatures(JSON.parse(raw));
-    } catch {
-      return {};
-    }
-  }
-  if (typeof raw !== "object") return {};
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const n = typeof v === "number" ? v : Number(v);
-    if (Number.isFinite(n)) out[k] = n;
-  }
-  return out;
 }
 
 export async function enqueueHumeSyncJob(callId: string, chatId: string, companyId: string) {
@@ -84,7 +65,6 @@ export async function enqueueHumeSyncJob(callId: string, chatId: string, company
     return;
   }
 
-  // Idempotent: only re-queue failed jobs. Never reopen COMPLETED/PROCESSING.
   if (existing.status === "FAILED") {
     await prisma.humeChatSyncJob.update({
       where: { id: existing.id },
@@ -97,11 +77,187 @@ export async function enqueueHumeSyncJob(callId: string, chatId: string, company
   }
 }
 
+export async function syncHumeChatForCall(callId: string) {
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    include: { conversation: true },
+  });
+  if (!call) throw new Error("call_not_found");
+
+  const correlation = await resolveHumeChatForCall(call);
+  if (correlation.status !== "MATCHED") {
+    throw new Error(`chat_correlation_${correlation.status.toLowerCase()}`);
+  }
+
+  if (!call.humeChatId || call.humeChatId !== correlation.chat.id) {
+    await persistHumeChatCorrelation({
+      callId: call.id,
+      chat: correlation.chat,
+      evidence: correlation.evidence,
+    });
+  }
+
+  const { events, totalPages } = await fetchAllHumeChatEvents(correlation.chat.id);
+  const lines = events
+    .map((event) => eventToTranscriptLine(event))
+    .filter((line): line is NonNullable<typeof line> => Boolean(line));
+
+  for (const line of lines) {
+    const existing = await prisma.message.findFirst({
+      where: {
+        conversationId: call.conversationId,
+        provider: "hume_evi",
+        providerMessageId: line.providerMessageId,
+      },
+      select: { id: true },
+    });
+    if (!existing) {
+      await prisma.message.create({
+        data: {
+          conversationId: call.conversationId,
+          senderType: line.speaker,
+          body: line.body,
+          provider: "hume_evi",
+          providerMessageId: line.providerMessageId,
+          providerStatus: line.interrupted ? "interrupted" : "stored",
+          createdAt: line.createdAt,
+        },
+      });
+    }
+  }
+
+  const transcriptMessages = await prisma.message.findMany({
+    where: {
+      conversationId: call.conversationId,
+      provider: "hume_evi",
+      providerStatus: { not: "interrupted" },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const transcriptLines = transcriptMessages.map((m) => ({
+    speaker: m.senderType as "CUSTOMER" | "AI",
+    body: m.body,
+    providerMessageId: m.providerMessageId || m.id,
+    createdAt: m.createdAt,
+  }));
+  const transcript = buildTranscriptText(transcriptLines);
+  const expression = computeExpressionAnalysis(events);
+  const eventCounts = countEventTypes(events);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.call.update({
+      where: { id: call.id },
+      data: {
+        transcript: transcript || call.transcript,
+        transcriptSyncStatus: "COMPLETED",
+        humeSyncStatus: "COMPLETED",
+        expressionAnalysisStatus: "COMPLETED",
+        recordingReconstructionStatus: "QUEUED",
+        metadata: {
+          ...((call.metadata as Record<string, unknown>) || {}),
+          humeEventCount: events.length,
+          humeEventPages: totalPages,
+          humeEventTypeCounts: eventCounts,
+        } as any,
+      },
+    });
+    await tx.conversation.update({
+      where: { id: call.conversationId },
+      data: {
+        lastMessage: transcriptMessages.at(-1)?.body || call.conversation.lastMessage,
+        lastMessageAt:
+          transcriptMessages.at(-1)?.createdAt || call.conversation.lastMessageAt || new Date(),
+      },
+    });
+    await tx.humeExpressionAnalysis.upsert({
+      where: { callId: call.id },
+      create: {
+        callId: call.id,
+        companyId: call.conversation.companyId,
+        chatId: correlation.chat.id,
+        status: "COMPLETED",
+        userTurnCount: expression.userTurnCount,
+        averageScores: expression.averages as any,
+        topExpressions: expression.topExpressions as any,
+        expressionTimeline: expression.timeline as any,
+        completedAt: new Date(),
+        rawSchemaVersion: "evi_v3",
+      },
+      update: {
+        status: "COMPLETED",
+        userTurnCount: expression.userTurnCount,
+        averageScores: expression.averages as any,
+        topExpressions: expression.topExpressions as any,
+        expressionTimeline: expression.timeline as any,
+        completedAt: new Date(),
+      },
+    });
+  });
+
+  try {
+    const audio = await requestHumeChatAudio(correlation.chat.id);
+    const status = String(audio?.status || "QUEUED").toUpperCase();
+    await prisma.call.update({
+      where: { id: call.id },
+      data: {
+        recordingSource: "HUME",
+        recordingReconstructionStatus:
+          status === "COMPLETE"
+            ? "COMPLETE"
+            : status === "ERROR"
+              ? "ERROR"
+              : status === "CANCELED"
+                ? "CANCELED"
+                : status === "IN_PROGRESS"
+                  ? "IN_PROGRESS"
+                  : "QUEUED",
+        recordingStatus: status,
+      },
+    });
+    if (status !== "COMPLETE") {
+      await queueHumeAudioPoll(call.id, correlation.chat.id);
+    }
+  } catch {
+    await queueHumeAudioPoll(call.id, correlation.chat.id);
+  }
+
+  await enqueuePostCallProcessing({
+    callId: call.id,
+    companyId: call.conversation.companyId,
+    humeChatId: correlation.chat.id,
+    callStatus: call.status,
+    hasTranscript: Boolean(transcript),
+  });
+
+  if (call.status === "COMPLETED" || call.status === "FAILED" || call.status === "MISSED") {
+    await finalizeCall({
+      callId: call.id,
+      companyId: call.conversation.companyId,
+      endReason: call.humeEndReason || "hume_chat_synced",
+      markCompleted: call.status === "COMPLETED",
+    });
+  }
+
+  return {
+    chatId: correlation.chat.id,
+    eventCount: events.length,
+    totalPages,
+    userMessageCount: eventCounts.USER_MESSAGE || 0,
+    agentMessageCount: eventCounts.AGENT_MESSAGE || 0,
+    interruptionCount: eventCounts.USER_INTERRUPTION || 0,
+    functionCallCount: (eventCounts.FUNCTION_CALL || 0) + (eventCounts.FUNCTION_CALL_RESPONSE || 0),
+    transcriptLength: transcript.length,
+  };
+}
+
 export async function runHumeSyncWorkerOnce(limit = 5) {
   await recoverStaleProcessingJobs();
 
   const jobs = await prisma.humeChatSyncJob.findMany({
-    where: { status: "PENDING", OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }] },
+    where: {
+      status: "PENDING",
+      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
+    },
     orderBy: [{ nextAttemptAt: "asc" }, { createdAt: "asc" }],
     take: limit,
   });
@@ -120,127 +276,11 @@ export async function runHumeSyncWorkerOnce(limit = 5) {
     processed += 1;
 
     try {
-      const call = await prisma.call.findUnique({
-        where: { id: job.callId },
-        include: { conversation: true },
+      await syncHumeChatForCall(job.callId);
+      await prisma.humeChatSyncJob.update({
+        where: { id: job.id },
+        data: { status: "COMPLETED", completedAt: new Date(), lastError: null },
       });
-      if (!call) throw new Error("call_not_found");
-
-      const events: HumeChatEvent[] = [];
-      let page = 0;
-      let totalPages = 1;
-      while (page < totalPages) {
-        const response = await listHumeChatEvents(job.chatId, page);
-        const pageEvents = Array.isArray(response?.events) ? response.events : [];
-        events.push(...pageEvents);
-        totalPages = Number(response?.total_pages || 1);
-        page += 1;
-      }
-
-      for (const event of events) {
-        const msg = eventToMessage(event);
-        if (!msg || !msg.providerMessageId) continue;
-        const existing = await prisma.message.findFirst({
-          where: {
-            conversationId: call.conversationId,
-            provider: "hume_evi",
-            providerMessageId: msg.providerMessageId,
-          },
-          select: { id: true },
-        });
-        if (!existing) {
-          await prisma.message.create({
-            data: {
-              conversationId: call.conversationId,
-              senderType: msg.senderType,
-              body: msg.body,
-              provider: "hume_evi",
-              providerMessageId: msg.providerMessageId,
-              providerStatus: "stored",
-              createdAt: msg.createdAt,
-            },
-          });
-        }
-      }
-
-      const transcriptMessages = await prisma.message.findMany({
-        where: { conversationId: call.conversationId, provider: "hume_evi" },
-        orderBy: { createdAt: "asc" },
-      });
-      const transcript = transcriptMessages
-        .map((m) => `${m.senderType === "CUSTOMER" ? "CUSTOMER" : "AI"}: ${m.body}`)
-        .join("\n");
-
-      const userEmotionEvents = events
-        .filter((e) => (e.message?.role || e.role) === "user")
-        .map((e) => parseEmotionFeatures(e.emotion_features))
-        .filter((e) => Object.keys(e).length > 0);
-
-      const totals: Record<string, number> = {};
-      for (const row of userEmotionEvents) {
-        for (const [k, v] of Object.entries(row)) totals[k] = (totals[k] || 0) + v;
-      }
-      const count = userEmotionEvents.length || 1;
-      const averages: Record<string, number> = {};
-      for (const [k, v] of Object.entries(totals)) averages[k] = Number((v / count).toFixed(4));
-      const topExpressions = Object.entries(averages)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([name, score]) => ({ name, score }));
-
-      await prisma.$transaction(async (tx) => {
-        await tx.call.update({
-          where: { id: call.id },
-          data: {
-            transcript: transcript || call.transcript,
-            transcriptSyncStatus: "COMPLETED",
-            humeSyncStatus: "COMPLETED",
-            expressionAnalysisStatus: "COMPLETED",
-          },
-        });
-        await tx.conversation.update({
-          where: { id: call.conversationId },
-          data: {
-            lastMessage: transcriptMessages.at(-1)?.body || call.conversation.lastMessage,
-            lastMessageAt: transcriptMessages.at(-1)?.createdAt || call.conversation.lastMessageAt || new Date(),
-          },
-        });
-        await tx.humeExpressionAnalysis.upsert({
-          where: { callId: call.id },
-          create: {
-            callId: call.id,
-            companyId: job.companyId,
-            chatId: job.chatId,
-            status: "COMPLETED",
-            userTurnCount: userEmotionEvents.length,
-            averageScores: averages as any,
-            topExpressions: topExpressions as any,
-            expressionTimeline: userEmotionEvents as any,
-            completedAt: new Date(),
-            rawSchemaVersion: "evi_v3",
-          },
-          update: {
-            status: "COMPLETED",
-            userTurnCount: userEmotionEvents.length,
-            averageScores: averages as any,
-            topExpressions: topExpressions as any,
-            expressionTimeline: userEmotionEvents as any,
-            completedAt: new Date(),
-          },
-        });
-        await tx.humeChatSyncJob.update({
-          where: { id: job.id },
-          data: { status: "COMPLETED", completedAt: new Date(), lastError: null },
-        });
-      });
-
-      await finalizeCall({
-        callId: call.id,
-        companyId: job.companyId,
-        endReason: call.humeEndReason || "hume_chat_ended",
-        markCompleted: true,
-      });
-      // Task sync happens inside finalizeCall; post-call jobs already queued by chat_ended.
       completed += 1;
     } catch (error) {
       const attempts = job.attempts + 1;

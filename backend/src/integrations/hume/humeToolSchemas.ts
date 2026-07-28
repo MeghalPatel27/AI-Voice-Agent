@@ -41,6 +41,7 @@ export const scheduleMeetingSchema = z.object({
   timezone: z.string().trim().optional(),
   purpose: z.string().trim().optional(),
   notes: z.string().trim().optional(),
+  modelResolvedIso: z.string().trim().optional(),
 });
 
 export const handoffSchema = z.object({

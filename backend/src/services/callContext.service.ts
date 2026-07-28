@@ -52,6 +52,65 @@ export type AiradeskCallContextPayload = {
   };
 };
 
+async function loadCompanyContextShell(companyId: string, client: DbClient = prisma) {
+  const [settings, company, knowledge] = await Promise.all([
+    client.companySettings.findUnique({
+      where: { companyId },
+    }),
+    client.company.findUnique({
+      where: { id: companyId },
+      select: { name: true, industry: true },
+    }),
+    client.knowledgeItem.findMany({
+      where: { companyId, enabled: true, isActive: true },
+      take: 20,
+    }),
+  ]);
+  return { settings, company, knowledge };
+}
+
+/**
+ * Soft context for inbound/direct phone calls when chat↔call mapping is not ready yet.
+ * Keeps EVI talking instead of stalling on a hard tool_error.
+ */
+export async function buildInboundFallbackCallContext(
+  companyId: string,
+  client: DbClient = prisma,
+): Promise<AiradeskCallContextPayload> {
+  const { settings, company, knowledge } = await loadCompanyContextShell(companyId, client);
+  const payload: AiradeskCallContextPayload = {
+    company: {
+      name: company?.name || "Company",
+      businessType: settings?.businessType || null,
+      services: knowledge.slice(0, 5).map((k) => k.title).filter(Boolean),
+      pricingGuidance: knowledge
+        .filter((k) => String(k.category || "").toUpperCase().includes("PRIC"))
+        .slice(0, 3)
+        .map((k) => k.title),
+      agentTone: settings?.aiTone || null,
+    },
+    customer: {
+      name: null,
+      preferredLanguage: "AUTO",
+    },
+    call: {
+      direction: "INBOUND",
+      collectionGoal: inboundDiscoveryGoal(),
+      callPurpose: "Inbound caller enquiry",
+      extraNotes: null,
+      preferredLanguage: "AUTO",
+      scheduledTime: null,
+      timezone: null,
+    },
+    recentContext: {
+      summary: null,
+      knownRequirements: [],
+    },
+  };
+  assertBoundedCallContext(payload);
+  return payload;
+}
+
 export async function buildAiradeskCallContext(
   callId: string,
   companyId: string,
@@ -77,23 +136,15 @@ export async function buildAiradeskCallContext(
     throw new Error("call_context_not_found");
   }
 
-  const settings = await client.companySettings.findUnique({
-    where: { companyId },
-  });
-  const company = await client.company.findUnique({
-    where: { id: companyId },
-    select: { name: true, industry: true },
-  });
-  const knowledge = await client.knowledgeItem.findMany({
-    where: { companyId, enabled: true, isActive: true },
-    take: 20,
-  });
-  const messages = await client.message.findMany({
-    where: { conversationId: call.conversationId },
-    orderBy: { createdAt: "desc" },
-    take: 8,
-    select: { senderType: true, body: true },
-  });
+  const [{ settings, company, knowledge }, messages] = await Promise.all([
+    loadCompanyContextShell(companyId, client),
+    client.message.findMany({
+      where: { conversationId: call.conversationId },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: { senderType: true, body: true },
+    }),
+  ]);
 
   const callMeta = (call.metadata as Record<string, unknown> | null) || {};
   const collectionGoal =
@@ -101,7 +152,8 @@ export async function buildAiradeskCallContext(
     (typeof callMeta.collectionGoal === "string" && callMeta.collectionGoal) ||
     (call.direction === "INBOUND" ? inboundDiscoveryGoal() : null);
   const callPurpose =
-    (typeof callMeta.callPurpose === "string" && callMeta.callPurpose) || null;
+    (typeof callMeta.callPurpose === "string" && callMeta.callPurpose) ||
+    (call.direction === "INBOUND" ? "Inbound caller enquiry" : null);
   const extraNotes =
     (typeof call.notes === "string" && call.notes.trim()) ||
     (typeof callMeta.extraNotes === "string" && callMeta.extraNotes) ||
