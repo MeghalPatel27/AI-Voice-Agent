@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import {
-  AlertTriangle,
   CalendarClock,
   CheckCircle2,
-  FileText,
   Clock3,
+  FileText,
   Loader2,
   PhoneCall,
   Plus,
@@ -13,8 +12,8 @@ import {
   Save,
   Search,
   ShieldAlert,
-  Sparkles,
   Trash2,
+  UserRound,
   Zap,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
@@ -47,7 +46,9 @@ type Filter =
 type TaskRow = {
   id: string;
   title: string;
+  displayTitle?: string;
   description: string;
+  workToDo?: string;
   status: TaskStatus;
   priority: Priority;
 
@@ -101,6 +102,9 @@ type TaskRow = {
     summary: string;
     raw?: string[];
     meetingTime?: string | null;
+    meetingScheduledAt?: string | null;
+    meetingStatus?: string | null;
+    bookingTitle?: string | null;
     captured?: boolean;
     source?: string | null;
   } | null;
@@ -131,11 +135,6 @@ type TeamMember = {
   isActive: boolean;
 };
 
-type TaskTypeOption = {
-  key: string;
-  label: string;
-};
-
 type TaskResponse = {
   summary: {
     total: number;
@@ -150,9 +149,7 @@ type TaskResponse = {
     completionRate: number;
   };
   tasks: TaskRow[];
-  todayFocus: TaskRow[];
   teamMembers: TeamMember[];
-  taskTypes: TaskTypeOption[];
 };
 
 const filters: {
@@ -164,10 +161,6 @@ const filters: {
   { label: "Unassigned", value: "UNASSIGNED" },
   { label: "Due Today", value: "DUE_TODAY" },
   { label: "Overdue", value: "OVERDUE" },
-  { label: "Critical", value: "CRITICAL" },
-  { label: "Blocked", value: "BLOCKED" },
-  { label: "Open", value: "OPEN" },
-  { label: "Doing", value: "DOING" },
   { label: "Completed", value: "COMPLETED" },
 ];
 
@@ -241,6 +234,38 @@ function getStatusTone(status: string) {
   return "normal";
 }
 
+function cleanLeadRequirement(value?: string | null) {
+  const candidate = String(value || "").replace(/\s+/g, " ").trim();
+  if (!candidate) return "";
+
+  const instructionPatterns = [
+    /^(?:you are|you'?re|act as|behave as|respond as|speak as|your role is|your task is|your goal is|system prompt|instructions?\s*:)/i,
+    /^(?:call this lead|contact this lead|collect .*requirements?|ask .*budget|schedule .*meeting)/i,
+    /speak naturally.*(?:sales|representative|agent)/i,
+    /\bconsultative\s+sales\s+representative\b/i,
+    /\b(?:opening behavior|opening behaviour|qualification flow|sales script|conversation objective)\b/i,
+    /\b(?:always|never|must|should|do not|don't)\b.*\b(?:ask|speak|sell|qualify|wait)\b/i,
+  ];
+
+  const operationalNoise = [
+    /^ai scheduled call/i,
+    /^customer completed (?:an )?ai (?:voice )?call/i,
+    /^incoming call started/i,
+    /^(?:phone|status|language|scheduled|started|completed|call sid|twilio call|provider|task id)\s*[:-]/i,
+  ];
+
+  return [...instructionPatterns, ...operationalNoise].some((pattern) =>
+    pattern.test(candidate),
+  )
+    ? ""
+    : candidate;
+}
+
+function safeClientName(task: TaskRow) {
+  const value = String(task.customerName || "").trim();
+  return value && value !== "-" ? value : "No client name";
+}
+
 export default function TasksPage() {
   const [searchParams] = useSearchParams();
 
@@ -249,7 +274,6 @@ export default function TasksPage() {
   const [assignee, setAssignee] = useState(
     () => searchParams.get("assignee") || "ALL"
   );
-  const [taskType, setTaskType] = useState("ALL");
   const [search, setSearch] = useState("");
 
   const [summary, setSummary] = useState<TaskResponse["summary"]>({
@@ -266,9 +290,7 @@ export default function TasksPage() {
   });
 
   const [tasks, setTasks] = useState<TaskRow[]>([]);
-  const [todayFocus, setTodayFocus] = useState<TaskRow[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
-  const [taskTypes, setTaskTypes] = useState<TaskTypeOption[]>([]);
 
   const [selectedId, setSelectedId] = useState("");
   const [selectedTask, setSelectedTask] = useState<TaskRow | null>(null);
@@ -315,7 +337,7 @@ export default function TasksPage() {
 
   function syncDraftFromTask(task: TaskRow) {
     setDraftTitle(task.title);
-    setDraftDescription(task.description || "");
+    setDraftDescription(task.workToDo || task.description || "");
     setDraftAssignedUserId(task.assignedUserId || "");
     setDraftManualOwner(task.manualOwner || "");
     setDraftDueAt(toDateInput(task.dueAt));
@@ -342,7 +364,6 @@ export default function TasksPage() {
         filter,
         priority,
         assignee,
-        taskType,
       });
 
       if (search.trim()) {
@@ -355,9 +376,7 @@ export default function TasksPage() {
 
       setSummary(data.summary);
       setTasks(data.tasks);
-      setTodayFocus(data.todayFocus);
       setTeamMembers(data.teamMembers);
-      setTaskTypes(data.taskTypes);
 
       const nextId =
         nextSelectedId || selectedIdRef.current || data.tasks[0]?.id || "";
@@ -382,7 +401,7 @@ export default function TasksPage() {
         setLoading(false);
       }
     }
-  }, [filter, priority, assignee, taskType, search]);
+  }, [filter, priority, assignee, search]);
 
   const hasActiveLifecycle = useMemo(
     () =>
@@ -508,19 +527,24 @@ export default function TasksPage() {
       setError("");
       setNotice("");
 
+      const payload: Record<string, unknown> = {
+        title: draftTitle,
+        description: draftDescription || null,
+        assignedUserId: draftAssignedUserId || null,
+        owner: draftAssignedUserId ? null : draftManualOwner || null,
+        dueAt: fromDateInput(draftDueAt),
+        priority: draftPriority,
+        status: draftStatus,
+        blockedReason: draftBlockedReason || null,
+      };
+
+      if (selectedTask.taskType !== "AI_CALL") {
+        payload.aiNotes = draftAiNotes || null;
+      }
+
       await apiFetch(`/api/tasks/${selectedTask.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          title: draftTitle,
-          description: draftDescription || null,
-          assignedUserId: draftAssignedUserId || null,
-          owner: draftAssignedUserId ? null : draftManualOwner || null,
-          dueAt: fromDateInput(draftDueAt),
-          priority: draftPriority,
-          status: draftStatus,
-          aiNotes: draftAiNotes || null,
-          blockedReason: draftBlockedReason || null,
-        }),
+        body: JSON.stringify(payload),
       });
 
       setNotice("Task saved");
@@ -651,27 +675,28 @@ export default function TasksPage() {
   }, [teamMembers]);
 
   return (
-    <section className="space-y-5">
-      <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-6">
+    <section className="space-y-5 pb-8">
+      <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-5 md:p-6">
         <div className="flex flex-col justify-between gap-5 xl:flex-row xl:items-start">
           <div>
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-xs font-medium text-cyan-200">
               <CheckCircle2 size={14} />
-              Work Execution
+              Task Board
             </div>
 
-            <h1 className="mt-5 text-3xl font-semibold tracking-[-0.05em] md:text-5xl">
+            <h1 className="mt-4 text-3xl font-semibold tracking-[-0.05em] md:text-5xl">
               Tasks
             </h1>
 
-            <p className="mt-3 max-w-3xl text-sm leading-6 text-white/45">
-              Create work, assign owners, set deadlines, handle blockers,
-              complete tasks, and track what must be done today.
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-white/45">
+              Select a client on the left. Review the work, owner, deadline and
+              status on the right.
             </p>
           </div>
 
           <div className="flex flex-wrap gap-2">
             <button
+              type="button"
               onClick={() => setShowAiCall((value) => !value)}
               className="flex h-12 items-center justify-center gap-2 rounded-2xl border border-cyan-300/30 bg-cyan-400/[0.10] px-5 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-400/[0.16]"
             >
@@ -680,29 +705,30 @@ export default function TasksPage() {
             </button>
 
             <button
+              type="button"
               onClick={() => setShowCreate((value) => !value)}
               className="flex h-12 items-center justify-center gap-2 rounded-2xl bg-white px-5 text-sm font-semibold text-black"
             >
               <Plus size={16} />
-              Create Task
+              New Task
             </button>
 
             <button
+              type="button"
               onClick={() => loadTasks()}
-              className="flex h-12 items-center justify-center gap-2 rounded-2xl border border-white/10 bg-black/25 px-5 text-sm text-white/70 hover:text-white"
+              aria-label="Refresh tasks"
+              className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-black/25 text-white/65 transition hover:bg-white/[0.07] hover:text-white"
             >
-              <RefreshCw size={16} />
-              Refresh
+              <RefreshCw size={17} />
             </button>
           </div>
         </div>
 
-        <div className="mt-6 grid gap-3 md:grid-cols-4 xl:grid-cols-10">
-          <SummaryCard label="Total" value={summary.total} />
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryCard label="Open" value={summary.open} />
-          <SummaryCard label="Doing" value={summary.doing} tone="info" />
+          <SummaryCard label="In progress" value={summary.doing} tone="info" />
           <SummaryCard
-            label="Due Today"
+            label="Due today"
             value={summary.dueToday}
             tone={summary.dueToday > 0 ? "warning" : "normal"}
           />
@@ -710,31 +736,6 @@ export default function TasksPage() {
             label="Overdue"
             value={summary.overdue}
             tone={summary.overdue > 0 ? "danger" : "normal"}
-          />
-          <SummaryCard
-            label="Unassigned"
-            value={summary.unassigned}
-            tone={summary.unassigned > 0 ? "warning" : "normal"}
-          />
-          <SummaryCard
-            label="Blocked"
-            value={summary.blocked}
-            tone={summary.blocked > 0 ? "danger" : "normal"}
-          />
-          <SummaryCard
-            label="Critical"
-            value={summary.critical}
-            tone={summary.critical > 0 ? "danger" : "normal"}
-          />
-          <SummaryCard
-            label="Done Today"
-            value={summary.completedToday}
-            tone="success"
-          />
-          <SummaryCard
-            label="Completion"
-            value={`${summary.completionRate}%`}
-            tone="info"
           />
         </div>
 
@@ -798,59 +799,11 @@ export default function TasksPage() {
         />
       ) : null}
 
-      {todayFocus.length > 0 ? (
-        <section className="rounded-[34px] border border-amber-500/20 bg-amber-500/10 p-6">
-          <div className="flex items-center gap-2 text-sm font-semibold text-amber-100">
-            <AlertTriangle size={18} />
-            Today’s Execution Focus
-          </div>
-
-          <p className="mt-2 text-sm text-amber-100/65">
-            These tasks are urgent because they are overdue, unassigned,
-            blocked, critical, emergency, or due today.
-          </p>
-
-          <div className="mt-5 grid gap-3 xl:grid-cols-4">
-            {todayFocus.map((task) => (
-              <button
-                key={task.id}
-                onClick={() => selectTask(task)}
-                className="rounded-[26px] border border-amber-500/20 bg-black/20 p-4 text-left transition hover:bg-black/30"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <p className="line-clamp-2 font-semibold text-amber-50">
-                    {task.title}
-                  </p>
-                  {task.isEmergency ? (
-                    <Zap size={18} className="shrink-0 text-red-100" />
-                  ) : null}
-                </div>
-
-                <p className="mt-3 line-clamp-2 text-sm leading-6 text-amber-100/70">
-                  {task.nextAction}
-                </p>
-
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Badge tone={getPriorityTone(task.priority)}>
-                    {formatEnum(task.priority)}
-                  </Badge>
-                  <Badge tone={task.isUnassigned ? "warning" : "normal"}>
-                    {task.ownerLabel}
-                  </Badge>
-                  <Badge tone={task.isOverdue ? "danger" : "normal"}>
-                    {task.dueLabel}
-                  </Badge>
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-6">
+      <section className="rounded-[30px] border border-white/10 bg-white/[0.04] p-4">
         <div className="flex flex-wrap gap-2">
           {filters.map((item) => (
             <button
+              type="button"
               key={item.value}
               onClick={() => setFilter(item.value)}
               className={`rounded-full border px-4 py-2 text-sm transition ${
@@ -864,34 +817,16 @@ export default function TasksPage() {
           ))}
         </div>
 
-        <div className="mt-5 grid gap-3 xl:grid-cols-[1fr_220px_240px_240px]">
+        <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_240px_200px]">
           <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-white/10 bg-black/25 px-4">
-            <Search size={17} className="text-white/30" />
+            <Search size={17} className="shrink-0 text-white/30" />
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search task, customer, owner, AI reason..."
+              placeholder="Search client or task..."
               className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-white/25"
             />
           </div>
-
-          <select
-            value={priority}
-            onChange={(event) =>
-              setPriority(event.target.value as "ALL" | Priority)
-            }
-            className="h-12 rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
-          >
-            {priorities.map((item) => (
-              <option
-                key={item.value}
-                value={item.value}
-                className="bg-[#05070d]"
-              >
-                {item.label}
-              </option>
-            ))}
-          </select>
 
           <select
             value={assignee}
@@ -910,15 +845,18 @@ export default function TasksPage() {
           </select>
 
           <select
-            value={taskType}
-            onChange={(event) => setTaskType(event.target.value)}
+            value={priority}
+            onChange={(event) =>
+              setPriority(event.target.value as "ALL" | Priority)
+            }
             className="h-12 rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
           >
-            <option value="ALL" className="bg-[#05070d]">
-              All task types
-            </option>
-            {taskTypes.map((item) => (
-              <option key={item.key} value={item.key} className="bg-[#05070d]">
+            {priorities.map((item) => (
+              <option
+                key={item.value}
+                value={item.value}
+                className="bg-[#05070d]"
+              >
                 {item.label}
               </option>
             ))}
@@ -926,44 +864,43 @@ export default function TasksPage() {
         </div>
       </section>
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_520px]">
-        <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-5">
-          <div className="mb-5 flex items-center justify-between gap-4">
+      <section className="grid gap-5 xl:grid-cols-[minmax(240px,1fr)_minmax(0,4fr)] xl:items-start">
+        <aside className="overflow-hidden rounded-[30px] border border-white/10 bg-white/[0.04] xl:sticky xl:top-5">
+          <div className="flex items-center justify-between gap-3 border-b border-white/10 p-5">
             <div>
-              <h2 className="text-2xl font-semibold tracking-[-0.04em]">
+              <h2 className="text-xl font-semibold tracking-[-0.04em]">
                 Work Queue
               </h2>
-              <p className="mt-1 text-sm text-white/40">
-                Execute tasks. People management belongs in Team.
+              <p className="mt-1 text-xs text-white/35">
+                Select a client
               </p>
             </div>
 
-            <p className="text-sm text-white/35">
-              {tasks.length} task{tasks.length === 1 ? "" : "s"}
-            </p>
+            <Badge tone="normal">{tasks.length}</Badge>
           </div>
 
-          {loading ? (
-            <LoadingState text="Loading tasks..." />
-          ) : tasks.length === 0 ? (
-            <EmptyState
-              icon={<CheckCircle2 size={34} />}
-              title="No tasks found"
-              description="Tasks will appear here when AI, staff or managers create work."
-            />
-          ) : (
-            <div className="space-y-3">
-              {tasks.map((task) => (
+          <div className="max-h-[calc(100vh-250px)] min-h-[520px] space-y-2 overflow-y-auto p-3">
+            {loading ? (
+              <LoadingState text="Loading tasks..." compact />
+            ) : tasks.length === 0 ? (
+              <EmptyState
+                icon={<CheckCircle2 size={30} />}
+                title="No tasks found"
+                description="Create a task or change the filters."
+                compact
+              />
+            ) : (
+              tasks.map((task) => (
                 <TaskCard
                   key={task.id}
                   task={task}
                   active={selectedId === task.id}
                   onClick={() => selectTask(task)}
                 />
-              ))}
-            </div>
-          )}
-        </section>
+              ))
+            )}
+          </div>
+        </aside>
 
         <TaskDetailPanel
           task={selectedTask}
@@ -996,7 +933,7 @@ export default function TasksPage() {
           onFollowUp={() => runAction("CREATE_FOLLOW_UP")}
           onRemove={removeTask}
         />
-      </div>
+      </section>
     </section>
   );
 }
@@ -1036,9 +973,8 @@ function ScheduleAiCallForm(props: {
           </div>
 
           <p className="mt-2 max-w-3xl text-sm leading-6 text-cyan-100/60">
-            Create a task for AI to call this person at the selected time, speak
-            in the selected language, collect requirements, and create a meeting
-            request from the call.
+            Choose who the AI should call, when it should call, and what it
+            should collect.
           </p>
         </div>
 
@@ -1054,7 +990,7 @@ function ScheduleAiCallForm(props: {
           />
         </Field>
 
-        <Field label="WhatsApp / call number">
+        <Field label="Phone number">
           <Input
             value={props.phone}
             onChange={props.setPhone}
@@ -1300,11 +1236,11 @@ function CreateTaskForm(props: {
         </div>
 
         <div className="xl:col-span-4">
-          <Field label="AI reason / manager note">
+          <Field label="Internal note">
             <textarea
               value={props.aiNotes}
               onChange={(event) => props.setAiNotes(event.target.value)}
-              placeholder="Why this task exists..."
+              placeholder="Optional context for the team..."
               className="min-h-[90px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
             />
           </Field>
@@ -1335,79 +1271,58 @@ function TaskCard({
   active: boolean;
   onClick: () => void;
 }) {
-  const serious =
-    task.isEmergency || task.isOverdue || task.priority === "CRITICAL";
+  const urgent = task.isEmergency || task.isOverdue || task.priority === "CRITICAL";
 
   return (
     <button
+      type="button"
       onClick={onClick}
-      className={`relative w-full overflow-hidden rounded-[28px] border p-5 text-left transition ${
+      className={`w-full rounded-2xl border p-4 text-left transition ${
         active
-          ? "border-cyan-200/70 bg-cyan-400/[0.08] shadow-[0_24px_90px_rgba(34,211,238,0.10)]"
-          : serious
-            ? "border-red-500/20 bg-red-500/[0.05] hover:bg-red-500/[0.08]"
-            : "border-white/10 bg-black/20 hover:bg-white/[0.06]"
+          ? "border-white bg-white text-black shadow-[0_16px_45px_rgba(255,255,255,0.08)]"
+          : urgent
+            ? "border-red-500/20 bg-red-500/[0.05] text-white hover:bg-red-500/[0.08]"
+            : "border-white/10 bg-black/20 text-white hover:bg-white/[0.07]"
       }`}
     >
-      {active ? (
-        <div className="absolute bottom-0 left-0 top-0 w-1 bg-cyan-200" />
-      ) : null}
-
-      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-lg font-semibold tracking-[-0.03em]">
-              {task.title}
-            </h3>
-
-            <Badge tone={getStatusTone(task.status)}>
-              {formatEnum(task.status)}
-            </Badge>
-
-            <Badge tone={getPriorityTone(task.priority)}>
-              {formatEnum(task.priority)}
-            </Badge>
-
-            {task.isEmergency ? <Badge tone="danger">Emergency</Badge> : null}
-          </div>
-
-          <p className="mt-2 text-sm text-white/42">
-            {task.taskTypeLabel} · {task.source} · Updated{" "}
-            {formatTime(task.updatedAt)}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p
+            className={`truncate text-sm font-semibold ${
+              active ? "text-black" : "text-white"
+            }`}
+          >
+            {safeClientName(task)}
           </p>
-
-          <p className="mt-4 line-clamp-2 text-sm leading-6 text-white/58">
-            {task.description || task.aiNotes}
+          <p
+            className={`mt-1 line-clamp-2 text-xs leading-5 ${
+              active ? "text-black/55" : "text-white/42"
+            }`}
+          >
+            {task.displayTitle || task.title}
           </p>
-
-          <div className="mt-5 grid gap-2 md:grid-cols-2">
-            <SmallLine label="Customer" value={task.customerName} />
-            <SmallLine label="Owner" value={task.ownerLabel} />
-            <SmallLine label="Due" value={task.dueLabel} />
-            <SmallLine label="SLA" value={task.slaLabel} />
-          </div>
-
-          {task.warnings.length > 0 ? (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {task.warnings.map((warning) => (
-                <Badge key={warning} tone="danger">
-                  {warning}
-                </Badge>
-              ))}
-            </div>
-          ) : null}
         </div>
 
-        <div className="rounded-[24px] border border-white/10 bg-black/25 p-4 xl:w-[310px]">
-          <p className="text-xs text-white/35">Next action</p>
-          <p className="mt-2 text-sm font-semibold leading-6 text-white/78">
-            {task.nextAction}
-          </p>
+        <Badge tone={getStatusTone(task.status)}>
+          {formatEnum(task.status)}
+        </Badge>
+      </div>
 
-          <div className="mt-4 flex items-center gap-2 text-xs text-white/35">
-            <CalendarClock size={14} />
-            {task.delayLabel}
-          </div>
+      <div
+        className={`mt-3 space-y-1.5 border-t pt-3 text-xs ${
+          active ? "border-black/10 text-black/55" : "border-white/8 text-white/38"
+        }`}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <UserRound size={13} className="shrink-0" />
+          <span className="truncate">{task.ownerLabel || "Unassigned"}</span>
+        </div>
+
+        <div className="flex min-w-0 items-center gap-2">
+          <CalendarClock size={13} className="shrink-0" />
+          <span className="truncate">
+            {task.dueAt ? task.dueLabel : "No deadline"}
+          </span>
         </div>
       </div>
     </button>
@@ -1449,210 +1364,255 @@ function TaskDetailPanel(props: {
 }) {
   if (!props.task) {
     return (
-      <aside className="rounded-[34px] border border-white/10 bg-white/[0.04] p-6">
+      <main className="rounded-[30px] border border-white/10 bg-white/[0.04] p-6">
         <EmptyState
           icon={<CheckCircle2 size={34} />}
-          title="Select a task"
-          description="Task execution details, assignment, deadline and actions will appear here."
+          title="Select a client"
+          description="The task, owner, deadline and status will appear here."
         />
-      </aside>
+      </main>
     );
   }
 
+  const task = props.task;
+  const requirement = cleanLeadRequirement(task.leadRequirements?.summary);
+  const meetingTime = task.leadRequirements?.meetingTime || "";
+  const workToDo =
+    String(task.workToDo || "").trim() ||
+    String(task.description || "").trim() ||
+    String(task.nextAction || "").trim() ||
+    task.title;
+  const isAiCallTask =
+    task.taskType === "AI_CALL" || task.conversationChannel === "AI_CALL";
+
   return (
-    <aside className="h-fit space-y-5 rounded-[34px] border border-white/10 bg-white/[0.04] p-5">
-      <div>
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-2xl font-semibold tracking-[-0.05em]">
-            Execute Task
+    <main className="min-w-0 space-y-5 rounded-[30px] border border-white/10 bg-white/[0.04] p-5 md:p-6">
+      <header className="flex flex-col justify-between gap-5 border-b border-white/10 pb-5 xl:flex-row xl:items-start">
+        <div className="min-w-0">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-100/60">
+            {safeClientName(task)}
+          </p>
+
+          <h2 className="mt-2 text-3xl font-semibold tracking-[-0.05em]">
+            {task.displayTitle || task.title}
           </h2>
 
-          {props.task.isEmergency ? (
-            <Badge tone="danger">Emergency</Badge>
-          ) : null}
+          <p className="mt-2 text-sm text-white/40">
+            Updated {formatTime(task.updatedAt)}
+          </p>
         </div>
 
-        <p className="mt-2 text-sm leading-6 text-white/42">
-          Change owner, deadline, priority, status, blockers and completion.
-        </p>
-      </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge tone={getStatusTone(task.status)}>
+            {formatEnum(task.status)}
+          </Badge>
+          <Badge tone={getPriorityTone(task.priority)}>
+            {formatEnum(task.priority)}
+          </Badge>
+          {task.isOverdue ? <Badge tone="danger">Overdue</Badge> : null}
+        </div>
+      </header>
 
-      {props.task.warnings.length > 0 ? (
-        <div className="rounded-[26px] border border-red-500/20 bg-red-500/10 p-4">
-          <div className="flex items-center gap-2 text-sm font-semibold text-red-100">
-            <ShieldAlert size={16} />
-            Execution risk
-          </div>
-
-          <div className="mt-3 space-y-2">
-            {props.task.warnings.map((warning) => (
-              <p key={warning} className="text-sm text-red-100/75">
-                {warning}
-              </p>
-            ))}
-          </div>
+      {task.warnings.length > 0 ? (
+        <div className="flex items-start gap-3 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3">
+          <ShieldAlert size={17} className="mt-0.5 shrink-0 text-red-100" />
+          <p className="text-sm leading-6 text-red-100/75">
+            {task.warnings.join(" · ")}
+          </p>
         </div>
       ) : null}
 
-      <PanelBlock title="Task Context" icon={<Sparkles size={16} />}>
-        <div className="grid grid-cols-2 gap-3">
-          <InfoBox label="Type" value={props.task.taskTypeLabel} />
-          <InfoBox label="Source" value={props.task.source} />
-          <InfoBox label="Customer" value={props.task.customerName} />
-          <InfoBox label="SLA" value={props.task.slaLabel} />
-          <InfoBox label="Due" value={props.task.dueLabel} />
-          <InfoBox label="Delay" value={props.task.delayLabel} />
-        </div>
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <InfoBox label="Client" value={safeClientName(task)} />
+        <InfoBox
+          label="Handled by"
+          value={task.ownerLabel || "Unassigned"}
+        />
+        <InfoBox
+          label="Deadline"
+          value={task.dueAt ? task.dueLabel : "No deadline"}
+        />
+        <InfoBox label="Status" value={formatEnum(task.status)} />
+      </section>
+
+      <PanelBlock title="What needs to be done" icon={<FileText size={16} />}>
+        <p className="whitespace-pre-wrap text-sm leading-7 text-white/68">
+          {workToDo}
+        </p>
       </PanelBlock>
 
-      {props.task.scheduledCall ? (
-        <PanelBlock title="AI Scheduled Call" icon={<PhoneCall size={16} />}>
-          <div className="rounded-[24px] border border-cyan-500/20 bg-cyan-500/10 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/55">
-              Call time
-            </p>
-            <p className="mt-2 text-lg font-semibold leading-7 text-cyan-50">
-              {props.task.scheduledCall.scheduledLabel || props.task.dueLabel}
-            </p>
-            <p className="mt-2 text-sm leading-6 text-cyan-100/60">
-              AI will call {props.task.scheduledCall.phone || props.task.customerPhone || "the customer"} and collect requirements.
-            </p>
+      {isAiCallTask ? (
+        <PanelBlock title="Customer result" icon={<CheckCircle2 size={16} />}>
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-white/32">
+                What the customer needs
+              </p>
+
+              {requirement ? (
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-white/72">
+                  {requirement}
+                </p>
+              ) : (
+                <p className="mt-3 text-sm leading-6 text-white/40">
+                  No clear customer requirement was stated during the call.
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-cyan-100/55">
+                Meeting requested
+              </p>
+              <p className="mt-3 text-sm font-semibold leading-6 text-cyan-50">
+                {meetingTime || "No meeting time was agreed during the call."}
+              </p>
+            </div>
+          </div>
+        </PanelBlock>
+      ) : null}
+
+      {task.scheduledCall ? (
+        <PanelBlock title="AI call" icon={<PhoneCall size={16} />}>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <InfoBox
+              label="Call time"
+              value={task.scheduledCall.scheduledLabel || task.dueLabel}
+            />
+            <InfoBox
+              label="Call status"
+              value={formatEnum(
+                task.scheduledCall.latestCallStatus ||
+                  task.scheduledCall.status ||
+                  task.status,
+              )}
+            />
+            <InfoBox
+              label="Customer meeting"
+              value={meetingTime || "Not requested by the customer"}
+            />
           </div>
 
           <div className="mt-3 grid grid-cols-2 gap-3">
             <InfoBox
-              label="Call status"
-              value={formatEnum(
-                props.task.scheduledCall.latestCallStatus ||
-                  props.task.scheduledCall.status ||
-                  "SCHEDULED",
-              )}
+              label="Language"
+              value={formatEnum(task.scheduledCall.preferredLanguage || "AUTO")}
             />
-            <InfoBox label="Language" value={formatEnum(props.task.scheduledCall.preferredLanguage || "AUTO")} />
-            <InfoBox label="Phone" value={props.task.scheduledCall.phone || props.task.customerPhone || "No phone"} />
+            <InfoBox
+              label="Phone"
+              value={task.scheduledCall.phone || task.customerPhone || "No phone"}
+            />
             <InfoBox
               label="Related call"
               value={
-                props.task.scheduledCall.relatedCallId ||
-                props.task.scheduledCall.callSid ||
+                task.scheduledCall.relatedCallId ||
+                task.scheduledCall.callSid ||
                 "Not started yet"
               }
             />
-            <InfoBox label="Purpose" value={props.task.scheduledCall.purpose || props.task.description || "Collect requirements"} />
-            <InfoBox label="Meeting time" value={props.task.scheduledCall.meetingTime || props.task.leadRequirements?.meetingTime || "Not captured yet"} />
           </div>
-          {(props.task.scheduledCall.analysisStatus ||
-            props.task.scheduledCall.transcriptSyncStatus ||
-            props.task.scheduledCall.recordingReconstructionStatus) && (
+          {(task.scheduledCall.analysisStatus ||
+            task.scheduledCall.transcriptSyncStatus ||
+            task.scheduledCall.recordingReconstructionStatus) && (
             <div className="mt-3 grid gap-2 sm:grid-cols-3">
               <InfoBox
                 label="Transcript"
-                value={formatEnum(props.task.scheduledCall.transcriptSyncStatus || "PENDING")}
+                value={formatEnum(task.scheduledCall.transcriptSyncStatus || "PENDING")}
               />
               <InfoBox
                 label="Analysis"
-                value={formatEnum(props.task.scheduledCall.analysisStatus || "NONE")}
+                value={formatEnum(task.scheduledCall.analysisStatus || "NONE")}
               />
               <InfoBox
                 label="Recording"
                 value={formatEnum(
-                  props.task.scheduledCall.recordingReconstructionStatus || "NOT_REQUESTED",
+                  task.scheduledCall.recordingReconstructionStatus || "NOT_REQUESTED",
                 )}
               />
             </div>
           )}
 
-          {props.task.scheduledCall.error ? (
-            <p className="mt-3 rounded-2xl border border-red-500/20 bg-red-500/10 p-3 text-xs leading-5 text-red-100">
-              {props.task.scheduledCall.error}
+          {task.scheduledCall.error ? (
+            <p className="mt-3 rounded-2xl border border-red-500/20 bg-red-500/10 p-3 text-sm leading-6 text-red-100">
+              {task.scheduledCall.error}
             </p>
           ) : null}
         </PanelBlock>
       ) : null}
 
-      {props.task.leadRequirements ? (
-        <PanelBlock title="Lead Requirements" icon={<FileText size={16} />}>
-          <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-white/30">
-              Collected by {props.task.leadRequirements.source || props.task.source}
-            </p>
-            <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-white/68">
-              {props.task.leadRequirements.summary}
-            </p>
-          </div>
+      <PanelBlock title="Quick actions" icon={<Zap size={16} />}>
+        <div className="flex flex-wrap gap-2">
+          {task.status === "OPEN" ? (
+            <ActionButton onClick={props.onStart} disabled={Boolean(props.saving)}>
+              Start task
+            </ActionButton>
+          ) : null}
 
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
-            <InfoBox label="Meeting requested" value={props.task.leadRequirements.meetingTime || "Not captured yet"} />
-            <InfoBox label="Requirement status" value={props.task.leadRequirements.captured ? "Captured" : "Waiting for AI call"} />
-          </div>
-        </PanelBlock>
-      ) : null}
+          {task.status !== "DONE" ? (
+            <ActionButton onClick={props.onDone} disabled={Boolean(props.saving)}>
+              Mark done
+            </ActionButton>
+          ) : (
+            <ActionButton onClick={props.onReopen} disabled={Boolean(props.saving)}>
+              Reopen
+            </ActionButton>
+          )}
 
-      <PanelBlock title="Execution Actions" icon={<Zap size={16} />}>
-        <div className="grid grid-cols-2 gap-2">
-          <ActionButton
-            onClick={props.onStart}
-            disabled={Boolean(props.saving)}
-          >
-            Start
-          </ActionButton>
-          <ActionButton
-            onClick={props.onBlock}
-            disabled={Boolean(props.saving)}
-          >
-            Block
-          </ActionButton>
-          <ActionButton onClick={props.onDone} disabled={Boolean(props.saving)}>
-            Done
-          </ActionButton>
-          <ActionButton
-            onClick={props.onEscalate}
-            disabled={Boolean(props.saving)}
-          >
+          {task.status !== "BLOCKED" && task.status !== "DONE" ? (
+            <ActionButton onClick={props.onBlock} disabled={Boolean(props.saving)}>
+              Mark blocked
+            </ActionButton>
+          ) : null}
+
+          {task.status === "BLOCKED" ? (
+            <ActionButton onClick={props.onReopen} disabled={Boolean(props.saving)}>
+              Resume task
+            </ActionButton>
+          ) : null}
+
+          {task.status !== "DONE" ? (
+            <ActionButton onClick={props.onFollowUp} disabled={Boolean(props.saving)}>
+              Create follow-up
+            </ActionButton>
+          ) : null}
+
+          <ActionButton onClick={props.onEscalate} disabled={Boolean(props.saving)}>
             Escalate
           </ActionButton>
-          <ActionButton
-            onClick={props.onReopen}
-            disabled={Boolean(props.saving)}
-          >
-            Reopen
-          </ActionButton>
-          <ActionButton
-            onClick={props.onFollowUp}
-            disabled={Boolean(props.saving)}
-          >
-            Follow-up
-          </ActionButton>
         </div>
-
-        <button
-          type="button"
-          onClick={props.onRemove}
-          disabled={Boolean(props.saving)}
-          className="mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 text-sm font-semibold text-red-100 transition hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {props.saving === "delete" ? (
-            <Loader2 className="animate-spin" size={16} />
-          ) : (
-            <Trash2 size={16} />
-          )}
-          Remove Task
-        </button>
       </PanelBlock>
 
       <form onSubmit={props.onSave} className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold">Task details</h3>
+            <p className="mt-1 text-sm text-white/38">
+              Update only the information the team needs to execute the work.
+            </p>
+          </div>
+        </div>
+
         <Field label="Task name">
           <Input value={props.draftTitle} onChange={props.setDraftTitle} />
         </Field>
 
-        <Field label="Owner">
-          <div className="grid gap-3 md:grid-cols-2">
+        <Field label="What needs to be done">
+          <textarea
+            value={props.draftDescription}
+            onChange={(event) => props.setDraftDescription(event.target.value)}
+            placeholder="Describe the expected work or deliverable."
+            className="min-h-[120px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
+          />
+        </Field>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Handled by">
             <select
               value={props.draftAssignedUserId}
               onChange={(event) =>
                 props.setDraftAssignedUserId(event.target.value)
               }
-              className="h-12 rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
+              className="h-12 w-full rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
             >
               <option value="" className="bg-[#05070d]">
                 No team member
@@ -1667,17 +1627,17 @@ function TaskDetailPanel(props: {
                 </option>
               ))}
             </select>
+          </Field>
 
+          <Field label="Manual owner">
             <Input
               value={props.draftManualOwner}
               onChange={props.setDraftManualOwner}
-              placeholder="Manual owner"
+              placeholder="Team or person"
               disabled={Boolean(props.draftAssignedUserId)}
             />
-          </div>
-        </Field>
+          </Field>
 
-        <div className="grid gap-3 md:grid-cols-3">
           <Field label="Deadline">
             <input
               type="datetime-local"
@@ -1685,29 +1645,6 @@ function TaskDetailPanel(props: {
               onChange={(event) => props.setDraftDueAt(event.target.value)}
               className="h-12 w-full rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
             />
-          </Field>
-
-          <Field label="Priority">
-            <select
-              value={props.draftPriority}
-              onChange={(event) =>
-                props.setDraftPriority(event.target.value as Priority)
-              }
-              className="h-12 w-full rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
-            >
-              <option value="CRITICAL" className="bg-[#05070d]">
-                Critical
-              </option>
-              <option value="HIGH" className="bg-[#05070d]">
-                High
-              </option>
-              <option value="MEDIUM" className="bg-[#05070d]">
-                Medium
-              </option>
-              <option value="LOW" className="bg-[#05070d]">
-                Low
-              </option>
-            </select>
           </Field>
 
           <Field label="Status">
@@ -1718,68 +1655,95 @@ function TaskDetailPanel(props: {
               }
               className="h-12 w-full rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none"
             >
-              <option value="OPEN" className="bg-[#05070d]">
-                Open
-              </option>
-              <option value="DOING" className="bg-[#05070d]">
-                Doing
-              </option>
-              <option value="BLOCKED" className="bg-[#05070d]">
-                Blocked
-              </option>
-              <option value="DONE" className="bg-[#05070d]">
-                Done
-              </option>
+              <option value="OPEN" className="bg-[#05070d]">Open</option>
+              <option value="DOING" className="bg-[#05070d]">In progress</option>
+              <option value="BLOCKED" className="bg-[#05070d]">Blocked</option>
+              <option value="DONE" className="bg-[#05070d]">Done</option>
             </select>
           </Field>
         </div>
 
-        <Field label="Task details">
-          <textarea
-            value={props.draftDescription}
-            onChange={(event) => props.setDraftDescription(event.target.value)}
-            className="min-h-[110px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none"
-          />
-        </Field>
-
-        <Field label="AI reason / note">
-          <textarea
-            value={props.draftAiNotes}
-            onChange={(event) => props.setDraftAiNotes(event.target.value)}
-            className="min-h-[110px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none"
-          />
-        </Field>
-
-        <Field label="Blocked reason">
-          <textarea
-            value={props.draftBlockedReason}
+        <Field label="Priority">
+          <select
+            value={props.draftPriority}
             onChange={(event) =>
-              props.setDraftBlockedReason(event.target.value)
+              props.setDraftPriority(event.target.value as Priority)
             }
-            placeholder="Required when task is blocked..."
-            className="min-h-[90px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
-          />
+            className="h-12 w-full rounded-2xl border border-white/10 bg-black/25 px-4 text-sm outline-none md:max-w-[260px]"
+          >
+            <option value="CRITICAL" className="bg-[#05070d]">Critical</option>
+            <option value="HIGH" className="bg-[#05070d]">High</option>
+            <option value="MEDIUM" className="bg-[#05070d]">Medium</option>
+            <option value="LOW" className="bg-[#05070d]">Low</option>
+          </select>
         </Field>
+
+        {!isAiCallTask ? (
+          <details className="rounded-2xl border border-white/10 bg-black/20">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white/60">
+              Additional notes
+            </summary>
+
+            <div className="space-y-4 border-t border-white/10 p-4">
+              <Field label="Internal note">
+                <textarea
+                  value={props.draftAiNotes}
+                  onChange={(event) => props.setDraftAiNotes(event.target.value)}
+                  className="min-h-[90px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none"
+                />
+              </Field>
+
+              {props.draftStatus === "BLOCKED" || props.draftBlockedReason ? (
+                <Field label="Blocked reason">
+                  <textarea
+                    value={props.draftBlockedReason}
+                    onChange={(event) =>
+                      props.setDraftBlockedReason(event.target.value)
+                    }
+                    placeholder="What is preventing completion?"
+                    className="min-h-[90px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
+                  />
+                </Field>
+              ) : null}
+            </div>
+          </details>
+        ) : props.draftStatus === "BLOCKED" || props.draftBlockedReason ? (
+          <Field label="Blocked reason">
+            <textarea
+              value={props.draftBlockedReason}
+              onChange={(event) =>
+                props.setDraftBlockedReason(event.target.value)
+              }
+              placeholder="What is preventing completion?"
+              className="min-h-[90px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
+            />
+          </Field>
+        ) : null}
 
         <button
           disabled={props.saving === "save"}
-          className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-white px-5 py-4 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-12 items-center justify-center gap-2 rounded-2xl bg-white px-6 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
         >
           {props.saving === "save" ? (
             <Loader2 className="animate-spin" size={16} />
           ) : (
             <Save size={16} />
           )}
-          Save Task
+          Save changes
         </button>
       </form>
 
-      <PanelBlock title="Activity Timeline" icon={<Clock3 size={16} />}>
-        {props.task.timeline.length === 0 ? (
-          <p className="text-sm text-white/40">No timeline yet.</p>
-        ) : (
-          <div className="space-y-3">
-            {props.task.timeline.map((item, index) => (
+      <details className="rounded-2xl border border-white/10 bg-black/20">
+        <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium text-white/60">
+          <Clock3 size={15} />
+          Activity history ({task.timeline.length})
+        </summary>
+
+        <div className="space-y-3 border-t border-white/10 p-4">
+          {task.timeline.length === 0 ? (
+            <p className="text-sm text-white/38">No activity yet.</p>
+          ) : (
+            task.timeline.map((item, index) => (
               <div
                 key={`${item.title}-${index}`}
                 className="border-l border-white/10 pl-3"
@@ -1788,20 +1752,29 @@ function TaskDetailPanel(props: {
                 <p className="mt-1 line-clamp-3 text-xs leading-5 text-white/38">
                   {item.description}
                 </p>
-                {item.recordingMediaUrl ? (
-                  <p className="mt-1 text-[11px] text-cyan-100/60">
-                    Recording available in Calls.
-                  </p>
-                ) : null}
                 <p className="mt-1 text-[11px] text-white/25">
                   {formatTime(item.createdAt)}
                 </p>
               </div>
-            ))}
-          </div>
+            ))
+          )}
+        </div>
+      </details>
+
+      <button
+        type="button"
+        onClick={props.onRemove}
+        disabled={Boolean(props.saving)}
+        className="flex h-11 items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/[0.06] px-4 text-sm text-red-100/75 transition hover:bg-red-500/10 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {props.saving === "delete" ? (
+          <Loader2 className="animate-spin" size={16} />
+        ) : (
+          <Trash2 size={16} />
         )}
-      </PanelBlock>
-    </aside>
+        Delete task
+      </button>
+    </main>
   );
 }
 
@@ -1859,17 +1832,6 @@ function Badge({
     >
       {children}
     </span>
-  );
-}
-
-function SmallLine({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
-      <p className="text-xs text-white/35">{label}</p>
-      <p className="mt-1 truncate text-sm font-medium text-white/75">
-        {value || "-"}
-      </p>
-    </div>
   );
 }
 
@@ -1958,9 +1920,19 @@ function Input({
   );
 }
 
-function LoadingState({ text }: { text: string }) {
+function LoadingState({
+  text,
+  compact = false,
+}: {
+  text: string;
+  compact?: boolean;
+}) {
   return (
-    <div className="flex min-h-[420px] items-center justify-center">
+    <div
+      className={`flex items-center justify-center ${
+        compact ? "min-h-[240px]" : "min-h-[420px]"
+      }`}
+    >
       <div className="flex items-center gap-3 rounded-3xl border border-white/10 bg-white/[0.04] px-5 py-4 text-sm text-white/50">
         <Loader2 className="animate-spin" size={18} />
         {text}
@@ -1973,13 +1945,19 @@ function EmptyState({
   icon,
   title,
   description,
+  compact = false,
 }: {
   icon: ReactNode;
   title: string;
   description: string;
+  compact?: boolean;
 }) {
   return (
-    <div className="flex min-h-[420px] flex-col items-center justify-center px-6 text-center">
+    <div
+      className={`flex flex-col items-center justify-center px-6 text-center ${
+        compact ? "min-h-[240px]" : "min-h-[420px]"
+      }`}
+    >
       <div className="flex h-14 w-14 items-center justify-center rounded-3xl bg-white/[0.06] text-white/40">
         {icon}
       </div>
