@@ -164,66 +164,497 @@ function cleanRequirementLine(value?: string | null) {
     .trim();
 }
 
-function extractPreferredMeetingTimeFromText(text: string) {
-  const lines = text
-    .split(/\n|\.|\?|!/)
-    .map(cleanRequirementLine)
-    .filter(Boolean);
-
-  const dayOrTimeWords = [
-    "tomorrow",
-    "today",
-    "morning",
-    "afternoon",
-    "evening",
-    "night",
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-    "sunday",
-    "kal",
-    "aaj",
-    "subah",
-    "shaam",
-    "dopahar",
-    "કાલે",
-    "આજે",
-    "સવારે",
-    "સાંજે",
-    "બપોરે",
-    "कल",
-    "आज",
-    "सुबह",
-    "शाम",
-    "दोपहर",
-  ];
-
-  const explicitTime =
-    /\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?|am|pm|[ap])\b/i;
-
-  const match = [...lines]
-    .reverse()
-    .find((line) => {
-      const lower = line.toLowerCase();
-      return (
-        explicitTime.test(lower) ||
-        dayOrTimeWords.some((word) => lower.includes(word))
-      );
-    });
-
-  return match ? match.slice(0, 180) : null;
+function normalizeComparableText(value?: string | null) {
+  return cleanRequirementLine(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function resolveMeetingDateTime(text: string | null | undefined): Date | null {
+function uniqueRequirementLines(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+
+  return values
+    .map((value) => cleanRequirementLine(value))
+    .filter(Boolean)
+    .filter((value) => {
+      const key = normalizeComparableText(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function isLikelyAgentPrompt(value?: string | null) {
+  const candidate = cleanRequirementLine(value);
+  if (!candidate) return false;
+
+  const normalized = candidate.toLowerCase();
+
+  if (
+    /^(?:act|behave|respond|speak)\s+as\b/i.test(candidate) ||
+    /^(?:you are|you'?re|your role is|your task is|your goal is|system prompt|instructions?\s*:)\b/i.test(
+      candidate,
+    ) ||
+    /<\s*\/?\s*(?:opening_behavior|instructions?|rules?|system|persona)\b/i.test(
+      candidate,
+    ) ||
+    /\bthe system begins the call\b/i.test(candidate) ||
+    /\bwait for the caller to respond\b/i.test(candidate)
+  ) {
+    return true;
+  }
+
+  const roleSignals = [
+    /\bconsultative\s+sales\s+representative\b/i,
+    /\b(?:ai|voice|calling|sales)\s+(?:agent|assistant|representative)\b/i,
+    /\b(?:salesperson|call-centre agent|call center agent)\b/i,
+  ];
+
+  const instructionSignals = [
+    /\b(?:always|never|must|should|do not|don't)\b/i,
+    /\b(?:ask the caller|ask the lead|wait for|speak only|sound natural)\b/i,
+    /\b(?:call objective|conversation objective|qualification flow|sales script)\b/i,
+    /\b(?:opening behavior|opening behaviour|company context|service context)\b/i,
+    /\b(?:collect .*requirements?|ask .*budget|schedule .*meeting)\b/i,
+  ];
+
+  const roleCount = roleSignals.filter((pattern) => pattern.test(candidate)).length;
+  const instructionCount = instructionSignals.filter((pattern) =>
+    pattern.test(candidate),
+  ).length;
+  const commandWords =
+    normalized.match(
+      /\b(?:always|never|must|should|do not|don't|ask|wait|speak|sell|qualify|collect|schedule)\b/g,
+    )?.length || 0;
+
+  return (
+    candidate.length > 1200 ||
+    roleCount >= 2 ||
+    (roleCount >= 1 && (instructionCount >= 1 || commandWords >= 2)) ||
+    (candidate.length > 300 && instructionCount >= 2 && commandWords >= 3)
+  );
+}
+
+function isConfiguredPromptLeak(value: string, promptTexts: string[]) {
+  const candidate = normalizeComparableText(value);
+  if (!candidate) return false;
+
+  return promptTexts.some((promptText) => {
+    const prompt = normalizeComparableText(promptText);
+    if (!prompt) return false;
+
+    if (candidate === prompt) return true;
+    if (candidate.length >= 60 && prompt.includes(candidate)) return true;
+    if (prompt.length >= 60 && candidate.includes(prompt)) return true;
+
+    const candidateWords = new Set(candidate.split(" ").filter(Boolean));
+    const promptWords = prompt.split(" ").filter(Boolean);
+    if (candidateWords.size < 10 || promptWords.length < 10) return false;
+
+    const overlap = promptWords.filter((word) => candidateWords.has(word)).length;
+    return overlap / Math.min(candidateWords.size, promptWords.length) >= 0.8;
+  });
+}
+
+type ConversationTurn = {
+  speaker: "CUSTOMER" | "AI" | "HUMAN";
+  text: string;
+  createdAt?: string | Date | null;
+};
+
+function parseTranscriptJson(value: string): ConversationTurn[] {
+  const trimmed = value.trim();
+
+  if (
+    !(
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    )
+  ) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    const turns: ConversationTurn[] = [];
+
+    const visit = (item: unknown) => {
+      if (!item) return;
+
+      if (Array.isArray(item)) {
+        item.forEach(visit);
+        return;
+      }
+
+      if (typeof item !== "object") return;
+
+      const record = item as Record<string, unknown>;
+      const role = String(
+        record.senderType ||
+          record.speaker ||
+          record.role ||
+          record.author ||
+          record.type ||
+          "",
+      ).toUpperCase();
+      const text = cleanRequirementLine(
+        typeof record.body === "string"
+          ? record.body
+          : typeof record.text === "string"
+            ? record.text
+            : typeof record.content === "string"
+              ? record.content
+              : typeof record.transcript === "string"
+                ? record.transcript
+                : "",
+      );
+
+      const speaker =
+        /CUSTOMER|CALLER|LEAD|PROSPECT|USER/.test(role)
+          ? "CUSTOMER"
+          : /AI|ASSISTANT|AGENT|BOT/.test(role)
+            ? "AI"
+            : /HUMAN|STAFF|EMPLOYEE/.test(role)
+              ? "HUMAN"
+              : null;
+
+      if (speaker && text) {
+        turns.push({
+          speaker,
+          text,
+          createdAt:
+            typeof record.createdAt === "string" ? record.createdAt : null,
+        });
+      }
+
+      for (const [key, child] of Object.entries(record)) {
+        if (
+          [
+            "senderType",
+            "speaker",
+            "role",
+            "author",
+            "type",
+            "body",
+            "text",
+            "content",
+            "transcript",
+            "createdAt",
+          ].includes(key)
+        ) {
+          continue;
+        }
+
+        visit(child);
+      }
+    };
+
+    visit(parsed);
+    return turns;
+  } catch {
+    return [];
+  }
+}
+
+function extractSpeakerTurnsFromTranscript(value?: string | null) {
+  const transcript = String(value || "").trim();
+  if (!transcript) return [];
+
+  const jsonTurns = parseTranscriptJson(transcript);
+  if (jsonTurns.length > 0) return jsonTurns;
+
+  const turns: ConversationTurn[] = [];
+  const pattern =
+    /(?:^|\n|\]\s*)(CUSTOMER|CALLER|LEAD|PROSPECT|USER|AI|ASSISTANT|AGENT|BOT|HUMAN|STAFF)\s*[:\-]\s*([\s\S]*?)(?=(?:\n|\]\s*)(?:CUSTOMER|CALLER|LEAD|PROSPECT|USER|AI|ASSISTANT|AGENT|BOT|HUMAN|STAFF)\s*[:\-]|$)/gi;
+
+  for (const match of transcript.matchAll(pattern)) {
+    const role = String(match[1] || "").toUpperCase();
+    const text = cleanRequirementLine(match[2]);
+    if (!text) continue;
+
+    turns.push({
+      speaker: /CUSTOMER|CALLER|LEAD|PROSPECT|USER/.test(role)
+        ? "CUSTOMER"
+        : /AI|ASSISTANT|AGENT|BOT/.test(role)
+          ? "AI"
+          : "HUMAN",
+      text,
+    });
+  }
+
+  if (turns.length > 0) return turns;
+
+  for (const line of transcript.split(/\r?\n+/)) {
+    const match = line.match(
+      /^(?:\[[^\]]+\]\s*)?(CUSTOMER|CALLER|LEAD|PROSPECT|USER|AI|ASSISTANT|AGENT|BOT|HUMAN|STAFF)\s*[:\-]\s*(.+)$/i,
+    );
+
+    if (!match) continue;
+
+    const role = String(match[1] || "").toUpperCase();
+    const text = cleanRequirementLine(match[2]);
+    if (!text) continue;
+
+    turns.push({
+      speaker: /CUSTOMER|CALLER|LEAD|PROSPECT|USER/.test(role)
+        ? "CUSTOMER"
+        : /AI|ASSISTANT|AGENT|BOT/.test(role)
+          ? "AI"
+          : "HUMAN",
+      text,
+    });
+  }
+
+  return turns;
+}
+
+function extractCustomerTurnsFromTranscript(value?: string | null) {
+  return uniqueRequirementLines(
+    extractSpeakerTurnsFromTranscript(value)
+      .filter((turn) => turn.speaker === "CUSTOMER")
+      .map((turn) => turn.text),
+  );
+}
+
+function isCustomerRequirementStatement(value?: string | null) {
+  const line = cleanRequirementLine(value);
+
+  if (!line || line.length < 8 || isLikelyAgentPrompt(line)) return false;
+
+  if (
+    /^(?:hello|hi|hey|yes|yeah|okay|ok|no|thanks|thank you|bye|goodbye|sure|fine)[.! ]*$/i.test(
+      line,
+    )
+  ) {
+    return false;
+  }
+
+  return /\b(?:need|needs|want|wants|looking for|require|requires|requirement|problem|issue|build|create|develop|design|redesign|website|web site|landing page|app|application|automation|agent|software|crm|booking|restaurant|clinic|real estate|ecommerce|e-commerce|integration|dashboard|payment|inventory|support|lead generation|follow[- ]?up|appointment|customer service|sales|portfolio|online store|mobile app)\b/i.test(
+    line,
+  );
+}
+
+function parseRequirementDetails(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object"
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  return typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function collectPostCallRequirementCandidates(task: any) {
+  const analyses = getRelevantCalls(task)
+    .map((call: any) => call.postAnalysis)
+    .filter(Boolean)
+    .sort((first: any, second: any) => {
+      const firstTime = new Date(
+        first.completedAt || first.updatedAt || first.createdAt || 0,
+      ).getTime();
+      const secondTime = new Date(
+        second.completedAt || second.updatedAt || second.createdAt || 0,
+      ).getTime();
+      return secondTime - firstTime;
+    });
+
+  const completedAnalysis =
+    analyses.find((analysis: any) =>
+      ["COMPLETED", "SUCCEEDED"].includes(
+        String(analysis.status || "").toUpperCase(),
+      ),
+    ) || analyses[0];
+
+  if (!completedAnalysis) return [];
+
+  const details = parseRequirementDetails(completedAnalysis.requirementDetails);
+
+  const values: unknown[] = [
+    details.primaryNeed,
+    details.customerNeed,
+    details.requirement,
+    details.requirements,
+    details.businessProblem,
+    details.customerRequest,
+    details.requestedCapabilities,
+    details.desiredCapabilities,
+    details.capabilities,
+    details.features,
+    details.integrationNeeds,
+    details.scope,
+    details.useCase,
+    completedAnalysis.requirementSummary,
+  ];
+
+  const flattened: string[] = [];
+
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      flattened.push(value);
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+    }
+  };
+
+  values.forEach(visit);
+  return flattened;
+}
+
+function collectPostCallMeetingCandidates(task: any) {
+  const analyses = getRelevantCalls(task)
+    .map((call: any) => call.postAnalysis)
+    .filter(Boolean)
+    .sort((first: any, second: any) => {
+      const firstTime = new Date(
+        first.completedAt || first.updatedAt || first.createdAt || 0,
+      ).getTime();
+      const secondTime = new Date(
+        second.completedAt || second.updatedAt || second.createdAt || 0,
+      ).getTime();
+      return secondTime - firstTime;
+    });
+
+  const candidates: string[] = [];
+
+  for (const analysis of analyses.slice(0, 2)) {
+    const details = parseRequirementDetails(analysis.requirementDetails);
+    const values = [
+      details.requestedNextStep,
+      details.meetingTime,
+      details.preferredMeetingTime,
+      details.appointmentTime,
+      details.scheduledTime,
+      details.timelineSignal,
+    ];
+
+    for (const value of values) {
+      if (typeof value === "string" && value.trim()) {
+        candidates.push(value.trim());
+      }
+    }
+  }
+
+  return uniqueRequirementLines(candidates);
+}
+
+function hasExplicitClockTime(value: string) {
+  return (
+    /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)\b/i.test(value) ||
+    /\b(?:at|around)\s+\d{1,2}(?::\d{2})?\b/i.test(value)
+  );
+}
+
+function hasFutureDayOrDate(value: string) {
+  return /\b(?:today|tomorrow|day after tomorrow|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}|kal|aaj|પરમદિવસ|કાલે|આજે|परसों|कल|आज)\b/i.test(
+    value,
+  );
+}
+
+function hasMeetingLanguage(value: string) {
+  return /\b(?:meeting|meet|schedule|book|appointment|demo|call back|callback|available|availability|free|slot|time works|consultation)\b/i.test(
+    value,
+  );
+}
+
+function extractMeetingEvidenceFromTask(task: any) {
+  const messageTurns: ConversationTurn[] = [
+    ...(task.conversation?.messages || []),
+  ]
+    .sort(
+      (first: any, second: any) =>
+        new Date(first.createdAt || 0).getTime() -
+        new Date(second.createdAt || 0).getTime(),
+    )
+    .map(
+      (message: any): ConversationTurn => ({
+        speaker:
+          message.senderType === "CUSTOMER"
+            ? "CUSTOMER"
+            : message.senderType === "AI"
+              ? "AI"
+              : "HUMAN",
+        text: cleanRequirementLine(message.body),
+        createdAt: message.createdAt,
+      }),
+    )
+    .filter((turn) => Boolean(turn.text));
+
+  const transcriptTurns = getRelevantCalls(task).flatMap((call: any) =>
+    extractSpeakerTurnsFromTranscript(call.transcript),
+  );
+
+  for (const turns of [messageTurns, transcriptTurns]) {
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      if (turn.speaker !== "CUSTOMER") continue;
+
+      const text = cleanRequirementLine(turn.text);
+      if (!text) continue;
+
+      const previousTurn = turns[index - 1];
+      const previousAskedForMeeting =
+        previousTurn?.speaker === "AI" && hasMeetingLanguage(previousTurn.text);
+
+      const explicitClock = hasExplicitClockTime(text);
+      const futureDay = hasFutureDayOrDate(text);
+
+      if (
+        (hasMeetingLanguage(text) && (explicitClock || futureDay)) ||
+        (previousAskedForMeeting && (explicitClock || futureDay)) ||
+        (futureDay && explicitClock)
+      ) {
+        return text.slice(0, 220);
+      }
+    }
+  }
+
+  const scheduled = parseAiScheduledCallNotes(task.aiNotes);
+  const storedMeetingText = cleanRequirementLine(
+    scheduled?.leadRequirements?.meetingTime,
+  );
+
+  if (
+    scheduled?.meetingBookingId &&
+    storedMeetingText &&
+    (hasExplicitClockTime(storedMeetingText) ||
+      hasFutureDayOrDate(storedMeetingText))
+  ) {
+    return storedMeetingText.slice(0, 220);
+  }
+
+  const analysisCandidate = collectPostCallMeetingCandidates(task).find(
+    (candidate) =>
+      hasMeetingLanguage(candidate) &&
+      (hasExplicitClockTime(candidate) || hasFutureDayOrDate(candidate)),
+  );
+
+  return analysisCandidate?.slice(0, 220) || null;
+}
+
+function resolveMeetingDateTime(
+  text: string | null | undefined,
+  baseDate: Date = new Date(),
+): Date | null {
   const raw = cleanRequirementLine(text || "");
   if (!raw) return null;
 
   const lower = raw.toLowerCase().replace(/\./g, "");
-  const now = new Date();
-  const result = new Date(now);
+  const reference = new Date(baseDate);
+  const result = new Date(baseDate);
 
   const timeMatch =
     lower.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?|am|pm)\b/i) ||
@@ -271,10 +702,48 @@ function resolveMeetingDateTime(text: string | null | undefined): Date | null {
   ];
   const weekdayIdx = weekdays.findIndex((day) => lower.includes(day));
 
-  if (/tomorrow|kal|કાલે|कल/.test(lower)) {
+  const numericDate = lower.match(
+    /\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/,
+  );
+  const monthNames = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+  ];
+  const namedMonthMatch = lower.match(
+    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:,\s*(\d{4}))?\b/,
+  );
+
+  if (/day after tomorrow|પરમદિવસ|परसों/.test(lower)) {
+    result.setDate(result.getDate() + 2);
+  } else if (/tomorrow|kal|કાલે|कल/.test(lower)) {
     result.setDate(result.getDate() + 1);
   } else if (/today|aaj|આજે|आज/.test(lower)) {
-    // keep today
+    // Keep the call date.
+  } else if (numericDate) {
+    const day = Number(numericDate[1]);
+    const month = Number(numericDate[2]) - 1;
+    let year = numericDate[3]
+      ? Number(numericDate[3])
+      : reference.getFullYear();
+    if (year < 100) year += 2000;
+    result.setFullYear(year, month, day);
+  } else if (namedMonthMatch) {
+    const month = monthNames.indexOf(namedMonthMatch[1]);
+    const day = Number(namedMonthMatch[2]);
+    const year = namedMonthMatch[3]
+      ? Number(namedMonthMatch[3])
+      : reference.getFullYear();
+    result.setFullYear(year, month, day);
   } else if (weekdayIdx >= 0) {
     const current = result.getDay();
     let delta = (weekdayIdx - current + 7) % 7;
@@ -282,15 +751,24 @@ function resolveMeetingDateTime(text: string | null | undefined): Date | null {
     result.setDate(result.getDate() + delta);
   }
 
-  result.setSeconds(0, 0);
   result.setHours(hours, minutes, 0, 0);
 
-  if (result.getTime() <= now.getTime() + 30 * 60 * 1000) {
-    result.setDate(result.getDate() + (weekdayIdx >= 0 ? 7 : 1));
+  if (
+    !numericDate &&
+    !namedMonthMatch &&
+    !/today|tomorrow|day after tomorrow|aaj|kal|આજે|કાલે|પરમદિવસ|आज|कल|परसों/.test(
+      lower,
+    ) &&
+    weekdayIdx < 0 &&
+    result.getTime() <= reference.getTime() + 30 * 60 * 1000
+  ) {
+    result.setDate(result.getDate() + 1);
   }
 
+  if (Number.isNaN(result.getTime())) return null;
   return result;
 }
+
 function parseAiScheduledCallNotes(value?: string | null) {
   if (!value) return null;
 
@@ -325,41 +803,191 @@ function parseAiScheduledCallNotes(value?: string | null) {
   }
 }
 
+
+function getRelevantCalls(task: any) {
+  const calls = [...(task.conversation?.calls || [])].sort(
+    (first: any, second: any) =>
+      new Date(
+        second.endedAt || second.startedAt || second.createdAt || 0,
+      ).getTime() -
+      new Date(
+        first.endedAt || first.startedAt || first.createdAt || 0,
+      ).getTime(),
+  );
+
+  const scheduled = parseAiScheduledCallNotes(task.aiNotes);
+  const callReference = scheduled?.callSid;
+
+  if (callReference) {
+    const matchedCall = calls.find(
+      (call: any) =>
+        call.id === callReference ||
+        call.providerCallId === callReference ||
+        call.callSid === callReference,
+    );
+
+    if (matchedCall) return [matchedCall];
+  }
+
+  return calls.slice(0, 1);
+}
+
 function getAiScheduledCallDisplay(task: any) {
   const data = parseAiScheduledCallNotes(task.aiNotes);
-
   if (!data) return null;
 
   const scheduleLabel = data.scheduledAt
-    ? new Date(data.scheduledAt).toLocaleString("en-IN", {
-        day: "2-digit",
-        month: "short",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "scheduled time";
+    ? formatDateTimeLabel(data.scheduledAt)
+    : "Not scheduled";
 
   const parts = [
-    `AI scheduled call`,
+    "AI requirement call",
+    `Call time: ${scheduleLabel}`,
     data.status
       ? `Status: ${String(data.status).replace(/_/g, " ").toLowerCase()}`
       : "",
-    data.phone ? `Phone: ${data.phone}` : "",
-    `Time: ${scheduleLabel}`,
-    data.purpose ? `Purpose: ${data.purpose}` : "",
-    data.notes ? `Notes: ${data.notes}` : "",
     data.preferredLanguage
       ? `Language: ${String(data.preferredLanguage).replace(/_/g, " ").toLowerCase()}`
       : "",
-    data.callSid ? `Twilio call: ${data.callSid}` : "",
     data.error ? `Error: ${data.error}` : "",
   ];
 
   return parts.filter(Boolean).join("\n");
 }
 
+function buildLeadRequirementsFromTask(task: any) {
+  const scheduled = parseAiScheduledCallNotes(task.aiNotes);
+  const promptTexts = uniqueRequirementLines([
+    scheduled?.purpose,
+    scheduled?.notes,
+    task.description,
+  ]).filter((value) => value.length >= 20);
 
-function getScheduledCallInfo(task: any) {
+  const customerMessageLines = uniqueRequirementLines(
+    (task.conversation?.messages || [])
+      .filter((message: any) => message.senderType === "CUSTOMER")
+      .map((message: any) => message.body),
+  );
+
+  const customerTranscriptLines = uniqueRequirementLines(
+    getRelevantCalls(task).flatMap((call: any) =>
+      extractCustomerTurnsFromTranscript(call.transcript),
+    ),
+  );
+
+  const sanitizeRequirement = (value?: string | null) => {
+    const candidate = cleanRequirementLine(value);
+    if (!candidate) return "";
+    if (isLikelyAgentPrompt(candidate)) return "";
+    if (isConfiguredPromptLeak(candidate, promptTexts)) return "";
+
+    if (
+      /^(?:customer completed (?:an )?ai (?:voice )?call|incoming call started|outbound ai call requested|call this (?:lead|customer)|ai scheduled call)/i.test(
+        candidate,
+      )
+    ) {
+      return "";
+    }
+
+    if (
+      /^(?:phone|status|language|scheduled|started|completed|call sid|twilio call|provider|task id)\s*[:\-]/i.test(
+        candidate,
+      )
+    ) {
+      return "";
+    }
+
+    return candidate;
+  };
+
+  const structuredRequirements = collectPostCallRequirementCandidates(task)
+    .map((value) => sanitizeRequirement(value))
+    .filter(Boolean);
+
+  const spokenRequirements = uniqueRequirementLines([
+    ...customerMessageLines,
+    ...customerTranscriptLines,
+  ])
+    .filter((value) => isCustomerRequirementStatement(value))
+    .map((value) => sanitizeRequirement(value))
+    .filter(Boolean);
+
+  const storedAnalysisRequirement = sanitizeRequirement(
+    scheduled?.leadRequirements?.summary,
+  );
+
+  const requirementCandidates = uniqueRequirementLines([
+    ...structuredRequirements,
+    ...(storedAnalysisRequirement ? [storedAnalysisRequirement] : []),
+    ...spokenRequirements,
+  ]).filter((item, index, items) => {
+    const normalized = normalizeComparableText(item);
+
+    return !items.some((other, otherIndex) => {
+      if (index === otherIndex) return false;
+      const otherNormalized = normalizeComparableText(other);
+
+      return (
+        otherNormalized.length > normalized.length &&
+        otherNormalized.includes(normalized)
+      );
+    });
+  });
+
+  const summary = requirementCandidates.slice(0, 4).join(" · ");
+  const spokenMeetingText = extractMeetingEvidenceFromTask(task);
+
+  const latestCall = getRelevantCalls(task)[0];
+
+  const callBaseDate = new Date(
+    latestCall?.endedAt ||
+      latestCall?.startedAt ||
+      latestCall?.createdAt ||
+      task.updatedAt ||
+      new Date(),
+  );
+
+  const spokenResolved = spokenMeetingText
+    ? resolveMeetingDateTime(spokenMeetingText, callBaseDate)
+    : null;
+
+  const matchingBooking = spokenResolved
+    ? (task.conversation?.bookings || []).find((booking: any) => {
+        if (!booking.dateTime) return false;
+
+        const bookingTime = new Date(booking.dateTime).getTime();
+        return (
+          !Number.isNaN(bookingTime) &&
+          Math.abs(bookingTime - spokenResolved.getTime()) <= 10 * 60 * 1000
+        );
+      })
+    : null;
+
+  return {
+    summary,
+    raw: requirementCandidates,
+    meetingTime: spokenResolved
+      ? formatDateTimeLabel(spokenResolved)
+      : spokenMeetingText,
+    meetingScheduledAt: spokenResolved
+      ? spokenResolved.toISOString()
+      : null,
+    meetingStatus: matchingBooking?.status || null,
+    bookingTitle: matchingBooking?.title || null,
+    captured: requirementCandidates.length > 0,
+    source:
+      structuredRequirements.length > 0
+        ? "Post-call analysis"
+        : spokenRequirements.length > 0
+          ? "Customer conversation"
+          : "AI call",
+  };
+}
+
+function getScheduledCallInfo(
+  task: any,
+  leadRequirements?: ReturnType<typeof buildLeadRequirementsFromTask>,
+) {
   const data = parseAiScheduledCallNotes(task.aiNotes);
   if (!data) return null;
 
@@ -371,87 +999,130 @@ function getScheduledCallInfo(task: any) {
     scheduledLabel: formatDateTimeLabel(scheduledAt),
     phone: data.phone || getCustomerPhone(task) || null,
     fullName: data.fullName || getCustomerName(task),
-    purpose: data.purpose || task.description || null,
-    notes: data.notes || null,
+    purpose: null,
+    notes: null,
     preferredLanguage: data.preferredLanguage || "AUTO",
     startedAt: data.startedAt || null,
     completedAt: data.completedAt || task.completedAt || null,
     callSid: data.callSid || null,
     error: data.error || null,
-    meetingTime: data.leadRequirements?.meetingTime || null,
+    meetingTime: leadRequirements?.meetingTime || null,
   };
 }
 
-function buildLeadRequirementsFromTask(task: any) {
-  const scheduled = parseAiScheduledCallNotes(task.aiNotes);
-
-  const messageLines = (task.conversation?.messages || [])
-    .filter((message: any) => message.senderType === "CUSTOMER")
-    .map((message: any) => cleanRequirementLine(message.body))
-    .filter((body: string) => body && !body.toLowerCase().includes("incoming call started"));
-
-  const callTranscriptLines = (task.conversation?.calls || [])
-    .map((call: any) => cleanRequirementLine(call.transcript))
-    .filter(Boolean);
-
-  const bookingLines = (task.conversation?.bookings || [])
-    .map((booking: any) => {
-      const time = booking.dateTime ? formatDateTimeLabel(booking.dateTime) : null;
-      return time ? `${booking.title || "Meeting request"} · ${time}` : null;
-    })
-    .filter(Boolean);
-
-  const raw = [
-    scheduled?.leadRequirements?.summary || null,
-    ...messageLines,
-    ...callTranscriptLines,
-  ]
-    .filter(Boolean)
-    .map((value: any) => cleanRequirementLine(value))
-    .filter(Boolean)
-    .slice(-10);
-
-  const summary =
-    scheduled?.leadRequirements?.summary ||
-    task.conversation?.aiSummary ||
-    task.description ||
-    raw.slice(-6).join(" | ") ||
-    "Requirements not captured yet. After the AI call, the lead requirements will appear here.";
-
-  const bookingWithTime = (task.conversation?.bookings || []).find(
-    (booking: any) => booking.dateTime,
-  );
-
-  const spokenMeetingText =
-    extractPreferredMeetingTimeFromText(
-      [...messageLines, ...callTranscriptLines].join("\n"),
-    ) ||
-    (scheduled?.leadRequirements?.meetingTime
-      ? extractPreferredMeetingTimeFromText(
-          String(scheduled.leadRequirements.meetingTime),
-        )
-      : null);
-  const spokenResolved = resolveMeetingDateTime(spokenMeetingText);
-
-  const meetingTime =
-    (spokenResolved ? formatDateTimeLabel(spokenResolved) : null) ||
-    spokenMeetingText ||
-    (bookingWithTime ? formatDateTimeLabel(bookingWithTime.dateTime) : null) ||
-    null;
-
-  return {
-    summary,
-    raw,
-    meetingTime,
-    meetingScheduledAt: spokenResolved
-      ? spokenResolved.toISOString()
-      : bookingWithTime?.dateTime
-        ? new Date(bookingWithTime.dateTime).toISOString()
-        : null,
-    captured: raw.length > 0 || Boolean(task.conversation?.aiSummary),
-    source: task.conversation?.channel === "AI_CALL" ? "AI call" : getSource(task),
-  };
+function isCompletedCallStatus(value?: string | null) {
+  return [
+    "COMPLETED",
+    "COMPLETE",
+    "ENDED",
+    "FINISHED",
+    "HANGUP",
+    "DONE",
+    "SUCCEEDED",
+  ].includes(String(value || "").toUpperCase());
 }
+
+function isFailedCallStatus(value?: string | null) {
+  return [
+    "FAILED",
+    "MISSED",
+    "NO_ANSWER",
+    "BUSY",
+    "CANCELLED",
+    "CANCELED",
+  ].includes(String(value || "").toUpperCase());
+}
+
+function buildWorkToDo(
+  task: any,
+  taskType: string,
+  leadRequirements: ReturnType<typeof buildLeadRequirementsFromTask>,
+  scheduledCall: ReturnType<typeof getScheduledCallInfo>,
+) {
+  const customerName = getCustomerName(task);
+  const latestCall = task.conversation?.calls?.[0] || null;
+  const callStatus = scheduledCall?.status || latestCall?.status || null;
+
+  const isAiCallRelated =
+    taskType === "AI_CALL" || task.conversation?.channel === "AI_CALL";
+
+  if (isAiCallRelated) {
+    if (isFailedCallStatus(callStatus)) {
+      return `Contact ${customerName} manually or reschedule the AI call. The previous call did not complete successfully.`;
+    }
+
+    if (
+      !isCompletedCallStatus(callStatus) &&
+      !isCompletedCallStatus(latestCall?.status)
+    ) {
+      return `The AI will call ${customerName} at ${
+        scheduledCall?.scheduledLabel || getDueLabel(task, taskType)
+      }. No employee action is required until the call finishes.`;
+    }
+
+    if (leadRequirements.meetingTime && leadRequirements.summary) {
+      return `Prepare for the meeting with ${customerName} on ${leadRequirements.meetingTime}. Review the captured requirement: ${leadRequirements.summary}. Confirm the final scope, expected deliverables, budget and timeline during the meeting, then update this task with the agreed next step.`;
+    }
+
+    if (leadRequirements.meetingTime) {
+      return `Prepare for the meeting with ${customerName} on ${leadRequirements.meetingTime}. The call did not capture a clear requirement, so confirm exactly what the customer needs during the meeting and record the agreed scope and next step.`;
+    }
+
+    if (leadRequirements.summary) {
+      return `Follow up with ${customerName} about this requirement: ${leadRequirements.summary}. Confirm the scope, timeline, budget and the next step, then update this task.`;
+    }
+
+    return `Review the completed call with ${customerName}. No clear customer requirement or meeting time was captured, so contact the customer and confirm what they need before proceeding.`;
+  }
+
+  const description = cleanRequirementLine(task.description);
+
+  if (description && !isLikelyAgentPrompt(description)) {
+    return description;
+  }
+
+  return cleanRequirementLine(getNextAction(task, taskType)) ||
+    cleanText(task.title, "Review and complete this task.");
+}
+
+function getDisplayTaskTitle(
+  task: any,
+  taskType: string,
+  leadRequirements: ReturnType<typeof buildLeadRequirementsFromTask>,
+  scheduledCall: ReturnType<typeof getScheduledCallInfo>,
+) {
+  const isAiCallRelated =
+    taskType === "AI_CALL" || task.conversation?.channel === "AI_CALL";
+
+  if (!isAiCallRelated) {
+    return cleanText(task.title, "Customer task");
+  }
+
+  const latestCall = task.conversation?.calls?.[0] || null;
+  const callStatus = scheduledCall?.status || latestCall?.status || null;
+
+  if (isFailedCallStatus(callStatus)) {
+    return "Retry customer call";
+  }
+
+  if (
+    !isCompletedCallStatus(callStatus) &&
+    !isCompletedCallStatus(latestCall?.status)
+  ) {
+    return "AI call scheduled";
+  }
+
+  if (leadRequirements.meetingTime) {
+    return "Prepare for customer meeting";
+  }
+
+  if (leadRequirements.summary) {
+    return "Follow up on customer requirement";
+  }
+
+  return "Review completed AI call";
+}
+
 
 function buildRecordingMediaUrl(call: any) {
   if (!call?.id) return null;
@@ -761,14 +1432,18 @@ function buildTimeline(task: any) {
     },
   ];
 
-  if (task.aiNotes) {
+  const scheduledCallDisplay = getAiScheduledCallDisplay(task);
+
+  if (scheduledCallDisplay) {
     timeline.push({
-      title: parseAiScheduledCallNotes(task.aiNotes)
-        ? "AI scheduled call"
-        : "AI reason",
-      description:
-        getAiScheduledCallDisplay(task) ||
-        cleanText(task.aiNotes, "AI created this task."),
+      title: "AI call scheduled",
+      description: scheduledCallDisplay,
+      createdAt: task.createdAt,
+    });
+  } else if (task.aiNotes && !isLikelyAgentPrompt(task.aiNotes)) {
+    timeline.push({
+      title: "Internal note",
+      description: cleanText(task.aiNotes, "Task note"),
       createdAt: task.createdAt,
     });
   }
@@ -790,7 +1465,7 @@ function buildTimeline(task: any) {
   }
 
   if (task.conversation?.messages?.length) {
-    for (const message of task.conversation.messages.slice(0, 4)) {
+    for (const message of task.conversation.messages.slice(0, 8)) {
       timeline.push({
         title:
           message.senderType === "CUSTOMER"
@@ -818,33 +1493,51 @@ function buildTimeline(task: any) {
     }
   }
 
-  if (task.conversation?.bookings?.length) {
-    for (const booking of task.conversation.bookings.slice(0, 3)) {
-      timeline.push({
-        title: "Meeting request created",
-        description: `${booking.title || "Meeting"}${booking.dateTime ? ` · ${new Date(booking.dateTime).toLocaleString("en-IN")}` : " · time to confirm"}`,
-        createdAt: booking.createdAt,
-      });
-    }
-  }
-
-
   const leadRequirements = buildLeadRequirementsFromTask(task);
+
   if (leadRequirements.captured) {
     timeline.push({
-      title: "Lead requirements captured",
-      description: `${leadRequirements.summary}${leadRequirements.meetingTime ? `\nMeeting time: ${leadRequirements.meetingTime}` : ""}`,
+      title: "Customer requirement captured",
+      description: leadRequirements.summary,
       createdAt: task.updatedAt,
     });
   }
 
-  const scheduledCall = getScheduledCallInfo(task);
-  if (scheduledCall) {
+  if (leadRequirements.meetingTime) {
     timeline.push({
-      title: "Scheduled AI call time",
-      description: `AI call time: ${scheduledCall.scheduledLabel}\nStatus: ${scheduledCall.status}\nPhone: ${scheduledCall.phone || "Not available"}`,
-      createdAt: task.dueAt || task.createdAt,
+      title: "Customer meeting requested",
+      description: leadRequirements.meetingTime,
+      createdAt: task.updatedAt,
     });
+  }
+
+  if (
+    leadRequirements.meetingScheduledAt &&
+    task.conversation?.bookings?.length
+  ) {
+    const requestedMeetingTime = new Date(
+      leadRequirements.meetingScheduledAt,
+    ).getTime();
+
+    const matchingBooking = task.conversation.bookings.find((booking: any) => {
+      if (!booking.dateTime) return false;
+      const bookingTime = new Date(booking.dateTime).getTime();
+
+      return (
+        !Number.isNaN(bookingTime) &&
+        Math.abs(bookingTime - requestedMeetingTime) <= 10 * 60 * 1000
+      );
+    });
+
+    if (matchingBooking) {
+      timeline.push({
+        title: "Meeting record created",
+        description: `${matchingBooking.title || "Customer meeting"} · ${
+          leadRequirements.meetingTime
+        }`,
+        createdAt: matchingBooking.createdAt,
+      });
+    }
   }
 
   return timeline.sort(
@@ -856,11 +1549,39 @@ function buildTaskRow(task: any) {
   const taskType = getTaskType(task);
   const owner = getOwner(task);
   const latestCall = task.conversation?.calls?.[0] || null;
+  const leadRequirements =
+    taskType === "AI_CALL" || task.conversation?.channel === "AI_CALL"
+      ? buildLeadRequirementsFromTask(task)
+      : {
+          summary: "",
+          raw: [],
+          meetingTime: null,
+          meetingScheduledAt: null,
+          meetingStatus: null,
+          bookingTitle: null,
+          captured: false,
+          source: getSource(task),
+        };
+  const scheduledCall = getScheduledCallInfo(task, leadRequirements);
+  const workToDo = buildWorkToDo(
+    task,
+    taskType,
+    leadRequirements,
+    scheduledCall,
+  );
+  const displayTitle = getDisplayTaskTitle(
+    task,
+    taskType,
+    leadRequirements,
+    scheduledCall,
+  );
 
   return {
     id: task.id,
     title: cleanText(task.title, "Customer task"),
+    displayTitle,
     description: cleanText(task.description, ""),
+    workToDo,
     status: task.status,
     priority: task.priority,
 
@@ -889,12 +1610,13 @@ function buildTaskRow(task: any) {
     warnings: getWarnings(task, taskType),
 
     aiNotes:
-      getAiScheduledCallDisplay(task) ||
-      cleanText(task.aiNotes, "AI reason is not available for this task yet."),
-    scheduledCall: getScheduledCallInfo(task),
+      taskType === "AI_CALL"
+        ? getAiScheduledCallDisplay(task) || ""
+        : cleanText(task.aiNotes, ""),
+    scheduledCall,
     leadRequirements:
       taskType === "AI_CALL" || task.conversation?.channel === "AI_CALL"
-        ? buildLeadRequirementsFromTask(task)
+        ? leadRequirements
         : null,
     blockedReason: task.blockedReason || "",
 
@@ -1082,13 +1804,16 @@ export async function getTaskOperations(req: AuthRequest, res: Response) {
                 orderBy: {
                   createdAt: "desc",
                 },
-                take: 6,
+                take: 50,
               },
               calls: {
                 orderBy: {
                   createdAt: "desc",
                 },
                 take: 4,
+                include: {
+                  postAnalysis: true,
+                },
               },
               bookings: {
                 orderBy: {
@@ -1458,6 +2183,10 @@ export async function updateTask(req: AuthRequest, res: Response) {
       });
     }
 
+    const preserveAiCallMetadata = Boolean(
+      parseAiScheduledCallNotes(existingTask.aiNotes),
+    );
+
     const task = await prisma.task.update({
       where: {
         id: existingTask.id,
@@ -1475,7 +2204,7 @@ export async function updateTask(req: AuthRequest, res: Response) {
               : null,
         assignedUserId: result.data.assignedUserId,
         owner: ownerValue,
-        aiNotes: result.data.aiNotes,
+        aiNotes: preserveAiCallMetadata ? undefined : result.data.aiNotes,
         blockedReason: result.data.blockedReason,
         completedAt:
           result.data.status === "DONE"
