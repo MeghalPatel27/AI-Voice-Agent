@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -9,11 +10,9 @@ import { useNavigate } from "react-router";
 import {
   AlertTriangle,
   ArrowRight,
-  Bot,
   CalendarCheck,
   Check,
   CheckCircle2,
-  ChevronDown,
   Clock3,
   FileText,
   Filter,
@@ -25,14 +24,25 @@ import {
   RefreshCw,
   Search,
   Send,
-  ShieldAlert,
   Sparkles,
-  UserRound,
   UsersRound,
   X,
   XCircle,
 } from "lucide-react";
 import { API_BASE_URL, apiFetch } from "./lib/api";
+import {
+  BusinessIntentPanel,
+  HumeInsightsPanel,
+  RequirementsPanel,
+} from "./components/CallInsightPanels";
+import { TranscriptPanel } from "./components/TranscriptPanel";
+import {
+  recordingStateLabel,
+  resolveRecordingUiState,
+} from "./lib/recordingState";
+import { isLiveCallStatus, type PostCallAnalysisView } from "./lib/postCallAnalysis";
+import { useBoundedLivePoll } from "./lib/livePoll";
+import type { HumeExpressionAnalysis } from "./types/crm";
 
 type AiCallLanguage = "AUTO" | "ENGLISH" | "HINDI" | "GUJARATI";
 
@@ -123,6 +133,7 @@ type Call = {
   failureReason?: string | null;
   metadata?: Record<string, unknown> | null;
   postCallAnalysis?: PostCallAnalysis | null;
+  humeExpressionAnalysis?: HumeExpressionAnalysis | null;
   createdAt: string;
   updatedAt?: string;
 };
@@ -370,9 +381,11 @@ export default function CallsPage() {
   const [outboundLanguage, setOutboundLanguage] =
     useState<AiCallLanguage>("AUTO");
 
-  async function loadCallDetail(id: string) {
+  async function loadCallDetail(id: string, options?: { silent?: boolean }) {
     try {
-      setLoadingDetail(true);
+      if (!options?.silent) {
+        setLoadingDetail(true);
+      }
       setError("");
 
       const data = await apiFetch<CallDetailResponse>(`/api/calls/${id}`);
@@ -386,13 +399,17 @@ export default function CallsPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load call record");
     } finally {
-      setLoadingDetail(false);
+      if (!options?.silent) {
+        setLoadingDetail(false);
+      }
     }
   }
 
-  async function loadCalls(nextSelectedId?: string) {
+  const loadCalls = useCallback(async (nextSelectedId?: string, options?: { silent?: boolean }) => {
     try {
-      setLoadingList(true);
+      if (!options?.silent) {
+        setLoadingList(true);
+      }
       setError("");
 
       const params = new URLSearchParams();
@@ -429,7 +446,7 @@ export default function CallsPage() {
         "";
 
       if (idToOpen) {
-        await loadCallDetail(idToOpen);
+        await loadCallDetail(idToOpen, { silent: options?.silent });
       } else {
         setSelectedId("");
         setSelectedConversation(null);
@@ -437,9 +454,22 @@ export default function CallsPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load calls");
     } finally {
-      setLoadingList(false);
+      if (!options?.silent) {
+        setLoadingList(false);
+      }
     }
-  }
+  }, [callStatus, search, selectedId, status]);
+
+  const hasLiveCalls = useMemo(
+    () =>
+      conversations.some((conversation) => {
+        const call = conversation.latestCall || conversation.calls?.[0];
+        return isLiveCallStatus(call?.status);
+      }) || isLiveCallStatus(selectedConversation?.latestCall?.status),
+    [conversations, selectedConversation],
+  );
+
+  useBoundedLivePoll(hasLiveCalls, () => loadCalls(undefined, { silent: true }), 4000);
 
   async function loadTeamMembers() {
     try {
@@ -459,10 +489,14 @@ export default function CallsPage() {
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [search, status, callStatus]);
+  }, [loadCalls]);
 
   useEffect(() => {
-    void loadTeamMembers();
+    const timer = window.setTimeout(() => {
+      void loadTeamMembers();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -697,7 +731,6 @@ export default function CallsPage() {
               transcript={transcript}
               teamMembers={teamMembers}
               working={working}
-              onOpenTranscript={() => setModal("TRANSCRIPT")}
               onCreateFollowUp={() => setModal("FOLLOW_UP")}
               onHumanRequired={() => void markHumanRequired()}
               onResolve={() => void markResolved()}
@@ -891,7 +924,7 @@ function CallRecordList({
         ) : conversations.length === 0 ? (
           <EmptyState
             icon={<PhoneCall size={30} />}
-            title="No call records"
+            title="No AI calls yet"
             description="Completed and live AI calls will appear here."
           />
         ) : (
@@ -996,7 +1029,6 @@ function CallRecord({
   transcript,
   teamMembers,
   working,
-  onOpenTranscript,
   onCreateFollowUp,
   onHumanRequired,
   onResolve,
@@ -1010,7 +1042,6 @@ function CallRecord({
   transcript: string;
   teamMembers: TeamUser[];
   working: boolean;
-  onOpenTranscript: () => void;
   onCreateFollowUp: () => void;
   onHumanRequired: () => void;
   onResolve: () => void;
@@ -1029,6 +1060,8 @@ function CallRecord({
     conversation.summary ||
     conversation.lastMessage ||
     "";
+  const recordingUiState = resolveRecordingUiState(call);
+  const analysisView = toPostCallAnalysisView(analysis);
 
   return (
     <Surface className="overflow-hidden">
@@ -1104,41 +1137,35 @@ function CallRecord({
           </RecordRow>
 
           <RecordRow label="Recording" icon={<Headphones size={18} />}>
-            {recordingUrl ? (
-              <div className="max-w-4xl">
+            <div className="max-w-4xl space-y-3">
+              <span className="inline-flex rounded-full border border-white/10 bg-black/25 px-3 py-1 text-xs text-white/55">
+                {recordingStateLabel(recordingUiState)}
+              </span>
+              {recordingUrl ? (
                 <AuthenticatedAudioPlayer url={recordingUrl} />
-              </div>
-            ) : (
-              <MutedText>
-                Recording is not available yet. It will appear after provider
-                processing completes.
-              </MutedText>
-            )}
+              ) : (
+                <MutedText>
+                  Recording is not available yet. It will appear after provider
+                  processing completes.
+                </MutedText>
+              )}
+            </div>
           </RecordRow>
 
-          <RecordRow label="Transcript" icon={<Mic2 size={18} />} last>
-            <button
-              type="button"
-              onClick={onOpenTranscript}
-              disabled={!transcript}
-              className="flex w-full max-w-4xl items-center justify-between gap-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.035] px-5 py-5 text-left transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <div>
-                <p className="text-sm font-medium text-white/72">
-                  {transcript ? "Full call transcript" : "Transcript unavailable"}
-                </p>
-                <p className="mt-1 text-xs text-white/34">
-                  {transcript
-                    ? `${wordCount(transcript)} words · collapsed by default`
-                    : "No transcript has been saved for this call."}
-                </p>
-              </div>
-              <span className="flex shrink-0 items-center gap-2 text-sm text-cyan-100/70">
-                {transcript ? "Open transcript" : "Not available"}
-                {transcript ? <ChevronDown size={16} /> : null}
-              </span>
-            </button>
+          <RecordRow label="Transcript" icon={<Mic2 size={18} />} last={false}>
+            <div className="max-w-4xl">
+              <TranscriptPanel raw={transcript} defaultExpanded={false} />
+            </div>
           </RecordRow>
+        </div>
+
+        <div className="mt-6 grid gap-4">
+          <RequirementsPanel
+            analysis={analysisView}
+            fallbackSummary={requirementSummary || customerIntentText}
+          />
+          <BusinessIntentPanel analysis={analysisView} />
+          <HumeInsightsPanel analysis={call?.humeExpressionAnalysis || null} />
         </div>
 
         <details className="mt-6 rounded-[26px] border border-white/10 bg-black/15 p-5">
@@ -2420,10 +2447,27 @@ function normalizeText(value?: string | null): string {
     .replace(/[^\p{L}\p{N}\s]/gu, "");
 }
 
-function startOfDay(value: Date): Date {
-  const next = new Date(value);
-  next.setHours(0, 0, 0, 0);
-  return next;
+function toPostCallAnalysisView(
+  analysis: PostCallAnalysis | null,
+): PostCallAnalysisView | null {
+  if (!analysis) return null;
+
+  const status = String(analysis.analysisStatus || "NONE").toUpperCase();
+  const allowed: PostCallAnalysisView["analysisStatus"][] = [
+    "NONE",
+    "PENDING",
+    "PROCESSING",
+    "COMPLETED",
+    "FAILED",
+    "INSUFFICIENT_DATA",
+  ];
+
+  return {
+    ...analysis,
+    analysisStatus: allowed.includes(status as PostCallAnalysisView["analysisStatus"])
+      ? (status as PostCallAnalysisView["analysisStatus"])
+      : "NONE",
+  };
 }
 
 function endOfDay(value: Date): Date {

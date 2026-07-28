@@ -5,7 +5,13 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import {
   AI_CALL_OWNER,
   AI_CALL_TASK_KIND,
-} from "../services/aiScheduledCall.service";
+  CALL_PURPOSE_MAX_LENGTH,
+  COLLECTION_GOAL_MAX_LENGTH,
+  EXTRA_NOTES_MAX_LENGTH,
+  aiCallLanguageSchema,
+  normalizePhoneNumber,
+  stringifyScheduledCallContext,
+} from "../services/aiScheduledCallContext";
 
 const taskQuerySchema = z.object({
   filter: z
@@ -56,14 +62,15 @@ const createTaskSchema = z.object({
 });
 
 const scheduleAiCallTaskSchema = z.object({
+  customerId: z.string().optional().nullable(),
   fullName: z.string().optional().nullable(),
   phone: z.string().min(3),
   scheduledAt: z.string().datetime(),
-  purpose: z.string().min(1),
-  notes: z.string().optional().nullable(),
-  preferredLanguage: z
-    .enum(["AUTO", "ENGLISH", "HINDI", "GUJARATI"])
-    .default("AUTO"),
+  timezone: z.string().trim().min(1).max(80).default("Asia/Kolkata"),
+  collectionGoal: z.string().trim().min(1).max(COLLECTION_GOAL_MAX_LENGTH),
+  callPurpose: z.string().trim().max(CALL_PURPOSE_MAX_LENGTH).optional().nullable(),
+  extraNotes: z.string().trim().max(EXTRA_NOTES_MAX_LENGTH).optional().nullable(),
+  preferredLanguage: aiCallLanguageSchema.default("AUTO"),
   priority: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]).default("HIGH"),
 });
 
@@ -134,14 +141,6 @@ function cleanText(value?: string | null, fallback = "Customer work") {
 
   return value;
 }
-
-function normalizePhoneNumber(value: string) {
-  return String(value || "")
-    .replace(/[\s()\-]/g, "")
-    .trim();
-}
-
-
 
 function formatDateTimeLabel(value?: string | Date | null) {
   if (!value) return "Not set";
@@ -304,10 +303,15 @@ function parseAiScheduledCallNotes(value?: string | null) {
       status?: string;
       phone?: string;
       fullName?: string;
+      collectionGoal?: string;
+      callPurpose?: string;
+      extraNotes?: string;
       purpose?: string;
       notes?: string;
       preferredLanguage?: "AUTO" | "ENGLISH" | "HINDI" | "GUJARATI";
       scheduledAt?: string;
+      timezone?: string;
+      customerId?: string | null;
       conversationId?: string;
       callSid?: string;
       startedAt?: string;
@@ -346,8 +350,12 @@ function getAiScheduledCallDisplay(task: any) {
       : "",
     data.phone ? `Phone: ${data.phone}` : "",
     `Time: ${scheduleLabel}`,
-    data.purpose ? `Purpose: ${data.purpose}` : "",
-    data.notes ? `Notes: ${data.notes}` : "",
+    (data.collectionGoal || data.purpose)
+      ? `Objective: ${data.collectionGoal || data.purpose}`
+      : "",
+    (data.extraNotes || data.notes)
+      ? `Private notes: ${data.extraNotes || data.notes}`
+      : "",
     data.preferredLanguage
       ? `Language: ${String(data.preferredLanguage).replace(/_/g, " ").toLowerCase()}`
       : "",
@@ -364,6 +372,14 @@ function getScheduledCallInfo(task: any) {
   if (!data) return null;
 
   const scheduledAt = data.scheduledAt || task.dueAt || null;
+  const latestCall =
+    (task.conversation?.calls || []).find(
+      (call: any) =>
+        data.callSid &&
+        (call.providerCallId === data.callSid || call.twilioCallSid === data.callSid),
+    ) ||
+    task.conversation?.calls?.[0] ||
+    null;
 
   return {
     status: data.status || task.status || "SCHEDULED",
@@ -371,12 +387,19 @@ function getScheduledCallInfo(task: any) {
     scheduledLabel: formatDateTimeLabel(scheduledAt),
     phone: data.phone || getCustomerPhone(task) || null,
     fullName: data.fullName || getCustomerName(task),
-    purpose: data.purpose || task.description || null,
-    notes: data.notes || null,
+    purpose: data.collectionGoal || data.purpose || task.description || null,
+    notes: data.extraNotes || data.notes || null,
     preferredLanguage: data.preferredLanguage || "AUTO",
+    timezone: data.timezone || "Asia/Kolkata",
     startedAt: data.startedAt || null,
     completedAt: data.completedAt || task.completedAt || null,
-    callSid: data.callSid || null,
+    callSid: data.callSid || latestCall?.providerCallId || latestCall?.twilioCallSid || null,
+    relatedCallId: latestCall?.id || null,
+    latestCallStatus: latestCall?.status || null,
+    transcriptSyncStatus: latestCall?.transcriptSyncStatus || null,
+    expressionAnalysisStatus: latestCall?.expressionAnalysisStatus || null,
+    recordingReconstructionStatus: latestCall?.recordingReconstructionStatus || null,
+    analysisStatus: latestCall?.postAnalysis?.status || null,
     error: data.error || null,
     meetingTime: data.leadRequirements?.meetingTime || null,
   };
@@ -1089,6 +1112,13 @@ export async function getTaskOperations(req: AuthRequest, res: Response) {
                   createdAt: "desc",
                 },
                 take: 4,
+                include: {
+                  postAnalysis: {
+                    select: {
+                      status: true,
+                    },
+                  },
+                },
               },
               bookings: {
                 orderBy: {
@@ -1189,6 +1219,10 @@ export async function scheduleAiCallTask(req: AuthRequest, res: Response) {
     const companyId = req.user.companyId;
     const phone = normalizePhoneNumber(result.data.phone);
     const scheduledAt = new Date(result.data.scheduledAt);
+    const collectionGoal = result.data.collectionGoal.trim();
+    const callPurpose = result.data.callPurpose?.trim() || null;
+    const extraNotes = result.data.extraNotes?.trim() || null;
+    const timezone = result.data.timezone.trim();
 
     if (!phone.startsWith("+")) {
       return res.status(400).json({
@@ -1209,12 +1243,25 @@ export async function scheduleAiCallTask(req: AuthRequest, res: Response) {
       });
     }
 
-    const existingCustomer = await prisma.customer.findFirst({
-      where: {
-        companyId,
-        phone,
-      },
-    });
+    const explicitCustomer = result.data.customerId
+      ? await prisma.customer.findFirst({
+          where: { id: result.data.customerId, companyId },
+        })
+      : null;
+    if (result.data.customerId && !explicitCustomer) {
+      return res.status(404).json({
+        message: "Selected customer was not found for this company.",
+      });
+    }
+
+    const existingCustomer =
+      explicitCustomer ||
+      (await prisma.customer.findFirst({
+        where: {
+          companyId,
+          phone,
+        },
+      }));
 
     const customer = existingCustomer
       ? await prisma.customer.update({
@@ -1226,8 +1273,9 @@ export async function scheduleAiCallTask(req: AuthRequest, res: Response) {
               result.data.fullName || existingCustomer.fullName || phone,
             notes: [
               existingCustomer.notes,
-              result.data.purpose,
-              result.data.notes,
+              collectionGoal,
+              callPurpose,
+              extraNotes,
               `Preferred AI call language: ${result.data.preferredLanguage}`,
             ]
               .filter(Boolean)
@@ -1246,8 +1294,9 @@ export async function scheduleAiCallTask(req: AuthRequest, res: Response) {
             leadScore: 55,
             notes:
               [
-                result.data.purpose,
-                result.data.notes,
+                collectionGoal,
+                callPurpose,
+                extraNotes,
                 `Preferred AI call language: ${result.data.preferredLanguage}`,
               ]
                 .filter(Boolean)
@@ -1262,27 +1311,26 @@ export async function scheduleAiCallTask(req: AuthRequest, res: Response) {
         companyId,
         customerId: customer.id,
         title: `AI call ${customer.fullName || phone}`,
-        description: `AI will call ${customer.fullName || phone}, speak in ${result.data.preferredLanguage === "AUTO" ? "the customer language" : result.data.preferredLanguage.toLowerCase()}, collect requirements, and create a meeting request.`,
+        description: `AI will call ${customer.fullName || phone}, speak in ${result.data.preferredLanguage === "AUTO" ? "the customer language" : result.data.preferredLanguage.toLowerCase()}, and collect: ${collectionGoal}`,
         owner: AI_CALL_OWNER,
         dueAt: scheduledAt,
         priority: result.data.priority,
         status: "OPEN",
-        aiNotes: JSON.stringify(
-          {
-            kind: AI_CALL_TASK_KIND,
-            version: 1,
-            status: "SCHEDULED",
-            phone,
-            fullName: result.data.fullName || customer.fullName || null,
-            purpose: result.data.purpose,
-            notes: result.data.notes || null,
-            preferredLanguage: result.data.preferredLanguage,
-            scheduledAt: scheduledAt.toISOString(),
-            createdBy: getCurrentUserId(req) || null,
-          },
-          null,
-          2,
-        ),
+        aiNotes: stringifyScheduledCallContext({
+          kind: AI_CALL_TASK_KIND,
+          version: 2,
+          status: "SCHEDULED",
+          phone,
+          fullName: result.data.fullName || customer.fullName || null,
+          collectionGoal,
+          callPurpose,
+          extraNotes,
+          preferredLanguage: result.data.preferredLanguage,
+          scheduledAt: scheduledAt.toISOString(),
+          timezone,
+          customerId: customer.id,
+          createdBy: getCurrentUserId(req) || null,
+        }),
       },
     });
 

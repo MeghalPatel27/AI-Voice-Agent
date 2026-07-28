@@ -1,5 +1,6 @@
-import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../../db/prisma";
+import { buildAiradeskCallContext } from "../../services/callContext.service";
 import { sendHumeToolResponse } from "./hume.client";
 import {
   captureLeadSchema,
@@ -34,7 +35,21 @@ export async function handleHumeToolCall(payload: HumeWebhookPayload) {
     where: { humeChatId: chatId },
     include: { conversation: { include: { customer: true } } },
   });
-  if (!call) throw new Error("chat_call_not_found");
+  if (!call) {
+    await sendHumeToolResponse(
+      chatId,
+      controlPlanePayload(
+        tool.tool_call_id,
+        {
+          ok: false,
+          code: "CALL_CONTEXT_NOT_FOUND",
+          error: "Unable to resolve call context for this chat.",
+        },
+        true,
+      ),
+    );
+    return;
+  }
 
   const existing = await prisma.humeToolCallReceipt.findUnique({
     where: { toolCallId: tool.tool_call_id },
@@ -56,24 +71,10 @@ export async function handleHumeToolCall(payload: HumeWebhookPayload) {
     const params = parseToolParams(tool.parameters);
     let result: unknown = { ok: true };
     if (tool.name === "airadesk_get_call_context") {
-      const settings = await prisma.companySettings.findUnique({
-        where: { companyId: call.conversation.companyId },
-      });
-      const knowledge = await prisma.knowledgeItem.findMany({
-        where: { companyId: call.conversation.companyId, enabled: true, isActive: true },
-        take: 20,
-      });
-      result = {
-        companyName: call.conversation.companyId,
-        aiTone: settings?.aiTone || null,
-        businessType: settings?.businessType || null,
-        customerName: call.conversation.customer?.fullName || null,
-        customerPhone: call.conversation.customer?.phone || call.phone,
-        outboundPurpose: (call.metadata as any)?.purpose || null,
-        outboundNotes: (call.metadata as any)?.notes || null,
-        preferredLanguage: (call.metadata as any)?.preferredLanguage || null,
-        knowledgeItems: knowledge.map((k) => ({ title: k.title, category: k.category, content: k.content })),
-      };
+      if (Object.keys(params).length > 0) {
+        throw new Error("context_tool_does_not_accept_parameters");
+      }
+      result = await buildAiradeskCallContext(call.id, call.conversation.companyId);
     } else if (tool.name === "airadesk_capture_lead_details") {
       const parsed = captureLeadSchema.parse(params);
       await prisma.$transaction(async (tx) => {
@@ -89,8 +90,11 @@ export async function handleHumeToolCall(payload: HumeWebhookPayload) {
                 budget: parsed.budget,
                 timeline: parsed.timeline,
                 preferredLanguage: parsed.preferredLanguage,
-              } as any,
-              notes: [call.conversation.customer?.notes || "", parsed.additionalNotes || ""].filter(Boolean).join("\n").slice(0, 4000),
+              } as Prisma.InputJsonValue,
+              notes: [call.conversation.customer?.notes || "", parsed.additionalNotes || ""]
+                .filter(Boolean)
+                .join("\n")
+                .slice(0, 4000),
             },
           });
         }
@@ -109,23 +113,33 @@ export async function handleHumeToolCall(payload: HumeWebhookPayload) {
       const parsed = scheduleMeetingSchema.parse(params);
       const date = new Date(parsed.preferredTimeText);
       if (Number.isNaN(date.getTime())) {
-        result = { ok: false, needsClarification: true, message: "Please provide a clear date and time." };
+        result = {
+          ok: false,
+          needsClarification: true,
+          message: "Please provide a clear date and time.",
+        };
       } else {
-        await prisma.booking.create({
-          data: {
-            companyId: call.conversation.companyId,
-            customerId: call.conversation.customerId,
-            conversationId: call.conversationId,
-            callId: call.id,
-            title: parsed.purpose || "AI Call Meeting",
-            dateTime: date,
-            timezone: parsed.timezone || undefined,
-            purpose: parsed.purpose || undefined,
-            notes: parsed.notes || undefined,
-            status: "REQUESTED",
-            acceptanceStatus: "PENDING_ACCEPTANCE",
-            nextAction: "Confirm meeting details with customer.",
-          },
+        await prisma.$transaction(async (tx) => {
+          await tx.booking.create({
+            data: {
+              companyId: call.conversation.companyId,
+              customerId: call.conversation.customerId,
+              conversationId: call.conversationId,
+              callId: call.id,
+              title: parsed.purpose || "AI Call Meeting",
+              dateTime: date,
+              timezone: parsed.timezone || undefined,
+              purpose: parsed.purpose || undefined,
+              notes: parsed.notes || undefined,
+              status: "REQUESTED",
+              acceptanceStatus: "PENDING_ACCEPTANCE",
+              nextAction: "Confirm meeting details with customer.",
+            },
+          });
+          await tx.conversation.update({
+            where: { id: call.conversationId },
+            data: { bookingCreated: true },
+          });
         });
         result = { ok: true, meetingCreated: true, scheduledAt: date.toISOString() };
       }
@@ -150,11 +164,12 @@ export async function handleHumeToolCall(payload: HumeWebhookPayload) {
       data: { status: "COMPLETED", error: null },
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "tool_failed";
     await sendHumeToolResponse(
       chatId,
       controlPlanePayload(
         tool.tool_call_id,
-        { ok: false, error: error instanceof Error ? error.message : "tool_failed" },
+        { ok: false, code: "TOOL_EXECUTION_ERROR", error: message },
         true,
       ),
     );

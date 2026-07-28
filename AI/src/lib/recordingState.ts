@@ -46,3 +46,20 @@ export function resolveRecordingUiState(call?: {
 
   return "unavailable";
 }
+
+export function recordingStateLabel(state: RecordingUiState): string {
+  switch (state) {
+    case "hume":
+      return "State: Hume";
+    case "preparing":
+      return "State: Preparing";
+    case "failed":
+      return "State: Failed";
+    case "legacy":
+      return "State: Legacy";
+    case "available":
+      return "State: Available";
+    default:
+      return "State: Unavailable";
+  }
+}

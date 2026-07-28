@@ -18,10 +18,19 @@ import {
   Zap,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
+import { isLiveCallStatus } from "./lib/postCallAnalysis";
+import {
+  isActiveScheduledCallNotesStatus,
+  isActiveTaskStatus,
+  useBoundedLivePoll,
+} from "./lib/livePoll";
 
 type TaskStatus = "OPEN" | "DOING" | "BLOCKED" | "DONE";
 type Priority = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 type AiCallLanguage = "AUTO" | "ENGLISH" | "HINDI" | "GUJARATI";
+const COLLECTION_GOAL_MAX_LENGTH = 1200;
+const EXTRA_NOTES_MAX_LENGTH = 2000;
+const CALL_PURPOSE_MAX_LENGTH = 200;
 
 type Filter =
   | "ALL"
@@ -79,6 +88,12 @@ type TaskRow = {
     startedAt?: string | null;
     completedAt?: string | null;
     callSid?: string | null;
+    relatedCallId?: string | null;
+    latestCallStatus?: string | null;
+    transcriptSyncStatus?: string | null;
+    expressionAnalysisStatus?: string | null;
+    recordingReconstructionStatus?: string | null;
+    analysisStatus?: string | null;
     error?: string | null;
     meetingTime?: string | null;
   } | null;
@@ -272,10 +287,14 @@ export default function TasksPage() {
   const [aiCallName, setAiCallName] = useState("");
   const [aiCallPhone, setAiCallPhone] = useState("");
   const [aiCallAt, setAiCallAt] = useState("");
-  const [aiCallPurpose, setAiCallPurpose] = useState(
+  const [aiCallCollectionGoal, setAiCallCollectionGoal] = useState(
     "Call this lead, collect website/software requirements, ask budget and timeline, then create a meeting request.",
   );
-  const [aiCallNotes, setAiCallNotes] = useState("");
+  const [aiCallPurpose, setAiCallPurpose] = useState("");
+  const [aiCallExtraNotes, setAiCallExtraNotes] = useState("");
+  const [aiCallTimezone, setAiCallTimezone] = useState(
+    Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata",
+  );
   const [aiCallLanguage, setAiCallLanguage] = useState<AiCallLanguage>("AUTO");
   const [aiCallPriority, setAiCallPriority] = useState<Priority>("HIGH");
 
@@ -312,10 +331,12 @@ export default function TasksPage() {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
-  const loadTasks = useCallback(async (nextSelectedId?: string) => {
+  const loadTasks = useCallback(async (nextSelectedId?: string, options?: { silent?: boolean }) => {
     try {
       setError("");
-      setLoading(true);
+      if (!options?.silent) {
+        setLoading(true);
+      }
 
       const params = new URLSearchParams({
         filter,
@@ -357,9 +378,24 @@ export default function TasksPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load tasks");
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
   }, [filter, priority, assignee, taskType, search]);
+
+  const hasActiveLifecycle = useMemo(
+    () =>
+      tasks.some(
+        (task) =>
+          isActiveTaskStatus(task.status) ||
+          isActiveScheduledCallNotesStatus(task.scheduledCall?.status) ||
+          isLiveCallStatus(task.scheduledCall?.latestCallStatus),
+      ),
+    [tasks],
+  );
+
+  useBoundedLivePoll(hasActiveLifecycle, () => loadTasks(undefined, { silent: true }), 4000);
 
   function selectTask(task: TaskRow) {
     setSelectedTask(task);
@@ -412,7 +448,7 @@ export default function TasksPage() {
   async function scheduleAiCallTask(event: FormEvent) {
     event.preventDefault();
 
-    if (!aiCallPhone.trim() || !aiCallAt || !aiCallPurpose.trim()) return;
+    if (!aiCallPhone.trim() || !aiCallAt || !aiCallCollectionGoal.trim()) return;
 
     try {
       setSaving("ai-call");
@@ -427,8 +463,10 @@ export default function TasksPage() {
             fullName: aiCallName.trim() || null,
             phone: aiCallPhone.trim(),
             scheduledAt: fromDateInput(aiCallAt),
-            purpose: aiCallPurpose.trim(),
-            notes: aiCallNotes.trim() || null,
+            timezone: aiCallTimezone,
+            collectionGoal: aiCallCollectionGoal.trim(),
+            callPurpose: aiCallPurpose.trim() || null,
+            extraNotes: aiCallExtraNotes.trim() || null,
             preferredLanguage: aiCallLanguage,
             priority: aiCallPriority,
           }),
@@ -438,10 +476,11 @@ export default function TasksPage() {
       setAiCallName("");
       setAiCallPhone("");
       setAiCallAt("");
-      setAiCallPurpose(
+      setAiCallCollectionGoal(
         "Call this lead, collect website/software requirements, ask budget and timeline, then create a meeting request.",
       );
-      setAiCallNotes("");
+      setAiCallPurpose("");
+      setAiCallExtraNotes("");
       setAiCallLanguage("AUTO");
       setAiCallPriority("HIGH");
       setShowAiCall(false);
@@ -717,16 +756,20 @@ export default function TasksPage() {
           fullName={aiCallName}
           phone={aiCallPhone}
           scheduledAt={aiCallAt}
-          purpose={aiCallPurpose}
-          notes={aiCallNotes}
+          collectionGoal={aiCallCollectionGoal}
+          callPurpose={aiCallPurpose}
+          extraNotes={aiCallExtraNotes}
+          timezone={aiCallTimezone}
           preferredLanguage={aiCallLanguage}
           priority={aiCallPriority}
           saving={saving === "ai-call"}
           setFullName={setAiCallName}
           setPhone={setAiCallPhone}
           setScheduledAt={setAiCallAt}
-          setPurpose={setAiCallPurpose}
-          setNotes={setAiCallNotes}
+          setCollectionGoal={setAiCallCollectionGoal}
+          setCallPurpose={setAiCallPurpose}
+          setExtraNotes={setAiCallExtraNotes}
+          setTimezone={setAiCallTimezone}
           setPreferredLanguage={setAiCallLanguage}
           setPriority={setAiCallPriority}
           onSubmit={scheduleAiCallTask}
@@ -962,16 +1005,20 @@ function ScheduleAiCallForm(props: {
   fullName: string;
   phone: string;
   scheduledAt: string;
-  purpose: string;
-  notes: string;
+  collectionGoal: string;
+  callPurpose: string;
+  extraNotes: string;
+  timezone: string;
   preferredLanguage: AiCallLanguage;
   priority: Priority;
   saving: boolean;
   setFullName: (value: string) => void;
   setPhone: (value: string) => void;
   setScheduledAt: (value: string) => void;
-  setPurpose: (value: string) => void;
-  setNotes: (value: string) => void;
+  setCollectionGoal: (value: string) => void;
+  setCallPurpose: (value: string) => void;
+  setExtraNotes: (value: string) => void;
+  setTimezone: (value: string) => void;
   setPreferredLanguage: (value: AiCallLanguage) => void;
   setPriority: (value: Priority) => void;
   onSubmit: (event: FormEvent) => void;
@@ -1024,6 +1071,14 @@ function ScheduleAiCallForm(props: {
           />
         </Field>
 
+        <Field label="Timezone">
+          <Input
+            value={props.timezone}
+            onChange={props.setTimezone}
+            placeholder="Asia/Kolkata"
+          />
+        </Field>
+
         <Field label="AI speaking language">
           <select
             value={props.preferredLanguage}
@@ -1070,25 +1125,54 @@ function ScheduleAiCallForm(props: {
           </select>
         </Field>
 
-        <div className="xl:col-span-2">
-          <Field label="What should AI collect?">
+        <div className="xl:col-span-4">
+          <Field label="What should AI collect? *">
+            <p className="mb-2 text-xs text-white/40">
+              This becomes the objective for this specific call. Describe the information the calling assistant should gather.
+            </p>
             <textarea
-              value={props.purpose}
-              onChange={(event) => props.setPurpose(event.target.value)}
+              value={props.collectionGoal}
+              onChange={(event) => props.setCollectionGoal(event.target.value)}
+              maxLength={COLLECTION_GOAL_MAX_LENGTH}
               placeholder="Collect requirement, budget, timeline, preferred meeting time..."
               className="min-h-[120px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
             />
+            <p className="mt-2 text-xs text-white/35">
+              {props.collectionGoal.length}/{COLLECTION_GOAL_MAX_LENGTH}
+            </p>
+          </Field>
+        </div>
+
+        <div className="xl:col-span-2">
+          <Field label="Short call purpose (optional)">
+            <textarea
+              value={props.callPurpose}
+              onChange={(event) => props.setCallPurpose(event.target.value)}
+              maxLength={CALL_PURPOSE_MAX_LENGTH}
+              placeholder="Follow up on earlier website inquiry"
+              className="min-h-[120px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
+            />
+            <p className="mt-2 text-xs text-white/35">
+              {props.callPurpose.length}/{CALL_PURPOSE_MAX_LENGTH}
+            </p>
           </Field>
         </div>
 
         <div className="xl:col-span-2">
           <Field label="Extra notes for AI">
+            <p className="mb-2 text-xs text-white/40">
+              Private background context for the calling assistant. These notes are not intended to be read aloud to the customer.
+            </p>
             <textarea
-              value={props.notes}
-              onChange={(event) => props.setNotes(event.target.value)}
+              value={props.extraNotes}
+              onChange={(event) => props.setExtraNotes(event.target.value)}
+              maxLength={EXTRA_NOTES_MAX_LENGTH}
               placeholder="Mention context, product, lead source, budget hint, meeting constraints..."
               className="min-h-[120px] w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25"
             />
+            <p className="mt-2 text-xs text-white/35">
+              {props.extraNotes.length}/{EXTRA_NOTES_MAX_LENGTH}
+            </p>
           </Field>
         </div>
       </div>
@@ -1098,7 +1182,7 @@ function ScheduleAiCallForm(props: {
           props.saving ||
           !props.phone.trim() ||
           !props.scheduledAt ||
-          !props.purpose.trim()
+          !props.collectionGoal.trim()
         }
         className="mt-5 flex h-12 items-center justify-center gap-2 rounded-2xl bg-cyan-100 px-5 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -1436,13 +1520,47 @@ function TaskDetailPanel(props: {
           </div>
 
           <div className="mt-3 grid grid-cols-2 gap-3">
-            <InfoBox label="Call status" value={formatEnum(props.task.scheduledCall.status || props.task.status)} />
+            <InfoBox
+              label="Call status"
+              value={formatEnum(
+                props.task.scheduledCall.latestCallStatus ||
+                  props.task.scheduledCall.status ||
+                  "SCHEDULED",
+              )}
+            />
             <InfoBox label="Language" value={formatEnum(props.task.scheduledCall.preferredLanguage || "AUTO")} />
             <InfoBox label="Phone" value={props.task.scheduledCall.phone || props.task.customerPhone || "No phone"} />
-            <InfoBox label="Twilio call" value={props.task.scheduledCall.callSid || "Not started yet"} />
+            <InfoBox
+              label="Related call"
+              value={
+                props.task.scheduledCall.relatedCallId ||
+                props.task.scheduledCall.callSid ||
+                "Not started yet"
+              }
+            />
             <InfoBox label="Purpose" value={props.task.scheduledCall.purpose || props.task.description || "Collect requirements"} />
             <InfoBox label="Meeting time" value={props.task.scheduledCall.meetingTime || props.task.leadRequirements?.meetingTime || "Not captured yet"} />
           </div>
+          {(props.task.scheduledCall.analysisStatus ||
+            props.task.scheduledCall.transcriptSyncStatus ||
+            props.task.scheduledCall.recordingReconstructionStatus) && (
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              <InfoBox
+                label="Transcript"
+                value={formatEnum(props.task.scheduledCall.transcriptSyncStatus || "PENDING")}
+              />
+              <InfoBox
+                label="Analysis"
+                value={formatEnum(props.task.scheduledCall.analysisStatus || "NONE")}
+              />
+              <InfoBox
+                label="Recording"
+                value={formatEnum(
+                  props.task.scheduledCall.recordingReconstructionStatus || "NOT_REQUESTED",
+                )}
+              />
+            </div>
+          )}
 
           {props.task.scheduledCall.error ? (
             <p className="mt-3 rounded-2xl border border-red-500/20 bg-red-500/10 p-3 text-xs leading-5 text-red-100">

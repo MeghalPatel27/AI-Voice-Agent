@@ -1,6 +1,6 @@
 import { prisma } from "../../db/prisma";
-import { finalizeCall, mapTwilioStatusToCallStatus, shouldApplyCallStatus } from "../../services/callFinalization.service";
-import { enqueueHumeSyncJob } from "./humeChatSync.service";
+import { shouldApplyCallStatus } from "../../services/callFinalization.service";
+import { applyHumeChatEndedLifecycle } from "../../services/callLifecycle.service";
 import { getHumeConfig } from "./hume.config";
 import { handleHumeToolCall } from "./humeTool.service";
 import type { HumeWebhookPayload } from "./hume.types";
@@ -11,7 +11,7 @@ function normalizePhone(value?: string | null) {
   return v.startsWith("+") ? v : `+${v}`;
 }
 
-async function resolveInboundCompanyId(toNumber?: string | null) {
+async function resolveInboundCompanyId(_toNumber?: string | null) {
   const cfg = getHumeConfig();
   if (!cfg.voiceCompanyId) throw new Error("voice_company_id_required_for_inbound");
   const company = await prisma.company.findUnique({ where: { id: cfg.voiceCompanyId } });
@@ -58,10 +58,15 @@ export async function processHumeWebhook(payload: HumeWebhookPayload) {
         });
 
     const existingBySid = twilioCallSid
-      ? await prisma.call.findFirst({ where: { OR: [{ providerCallId: twilioCallSid }, { twilioCallSid }] } })
+      ? await prisma.call.findFirst({
+          where: { OR: [{ providerCallId: twilioCallSid }, { twilioCallSid }] },
+        })
       : null;
 
     if (existingBySid) {
+      const answeredAt =
+        ((existingBySid.metadata as Record<string, unknown>) || {}).answeredAt ||
+        new Date().toISOString();
       await prisma.call.update({
         where: { id: existingBySid.id },
         data: {
@@ -71,7 +76,13 @@ export async function processHumeWebhook(payload: HumeWebhookPayload) {
           voiceAgentProvider: "HUME_EVI",
           telephonyProvider: "TWILIO",
           twilioCallSid: twilioCallSid || existingBySid.twilioCallSid,
-          status: shouldApplyCallStatus(existingBySid.status, "IN_PROGRESS") ? "IN_PROGRESS" : existingBySid.status,
+          status: shouldApplyCallStatus(existingBySid.status, "IN_PROGRESS")
+            ? "IN_PROGRESS"
+            : existingBySid.status,
+          metadata: {
+            ...((existingBySid.metadata as Record<string, unknown>) || {}),
+            answeredAt,
+          } as any,
         },
       });
       return;
@@ -105,7 +116,12 @@ export async function processHumeWebhook(payload: HumeWebhookPayload) {
         humeChatId: payload.chat_id,
         humeChatGroupId: payload.chat_group_id || null,
         humeConfigId: payload.config_id || null,
-        startedAt: payload.start_timestamp ? new Date(payload.start_timestamp * 1000) : new Date(),
+        startedAt: payload.start_timestamp
+          ? new Date(payload.start_timestamp * 1000)
+          : new Date(),
+        metadata: {
+          answeredAt: new Date().toISOString(),
+        },
       },
     });
     return;
@@ -117,20 +133,10 @@ export async function processHumeWebhook(payload: HumeWebhookPayload) {
   }
 
   if (payload.event_name === "chat_ended") {
-    const call = await prisma.call.findFirst({ where: { humeChatId: payload.chat_id }, include: { conversation: true } });
-    if (!call) return;
-    const terminal = mapTwilioStatusToCallStatus("completed", call.direction);
-    await prisma.call.update({
-      where: { id: call.id },
-      data: {
-        humeEndReason: String((payload as any).end_reason || "chat_ended"),
-        endedAt: payload.end_timestamp ? new Date(payload.end_timestamp * 1000) : call.endedAt || new Date(),
-        status: shouldApplyCallStatus(call.status, terminal) ? terminal : call.status,
-        humeSyncStatus: "PENDING",
-        transcriptSyncStatus: "PENDING",
-        expressionAnalysisStatus: "PENDING",
-      },
+    await applyHumeChatEndedLifecycle({
+      chatId: payload.chat_id,
+      endReason: String((payload as { end_reason?: string }).end_reason || "chat_ended"),
+      endTimestamp: payload.end_timestamp || null,
     });
-    await enqueueHumeSyncJob(call.id, payload.chat_id, call.conversation.companyId);
   }
 }

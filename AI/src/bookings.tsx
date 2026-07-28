@@ -24,11 +24,11 @@ import {
   Save,
   Search,
   UserRound,
-  UsersRound,
   X,
   XCircle,
 } from "lucide-react";
 import { apiFetch } from "./lib/api";
+import { useAuth } from "./auth/AuthContext";
 
 type BookingStatus =
   | "REQUESTED"
@@ -181,9 +181,11 @@ const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export default function BookingsPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const today = useMemo(() => new Date(), []);
   const todayKey = useMemo(() => toDateKey(today), [today]);
+  const [metricsNow] = useState(() => Date.now());
 
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
@@ -210,6 +212,13 @@ export default function BookingsPage() {
   const [notesDraft, setNotesDraft] = useState("");
   const [proposalDraft, setProposalDraft] = useState(false);
   const [outcomeDraft, setOutcomeDraft] = useState<MeetingOutcome>("");
+
+  function applySelectedBooking(booking: Booking | null) {
+    setSelectedBooking(booking);
+    setNotesDraft(booking?.meetingNotes || "");
+    setProposalDraft(Boolean(booking?.proposalSent));
+    setOutcomeDraft(normalizeOutcome(booking?.outcome));
+  }
 
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
@@ -242,7 +251,7 @@ export default function BookingsPage() {
       const nextSelected =
         nextBookings.find((booking) => booking.id === idToOpen) || null;
 
-      setSelectedBooking(nextSelected);
+      applySelectedBooking(nextSelected);
 
       if (nextSelected?.dateTime) {
         const nextDate = new Date(nextSelected.dateTime);
@@ -285,15 +294,14 @@ export default function BookingsPage() {
   }
 
   useEffect(() => {
-    void loadBookings();
-    void loadReferenceData();
-  }, []);
+    const timer = window.setTimeout(() => {
+      void loadBookings();
+      void loadReferenceData();
+    }, 0);
 
-  useEffect(() => {
-    setNotesDraft(selectedBooking?.meetingNotes || "");
-    setProposalDraft(Boolean(selectedBooking?.proposalSent));
-    setOutcomeDraft(normalizeOutcome(selectedBooking?.outcome));
-  }, [selectedBooking]);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only bookings bootstrap
+  }, []);
 
   const filteredBookings = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -358,7 +366,7 @@ export default function BookingsPage() {
   );
 
   const metrics = useMemo<MeetingMetrics>(() => {
-    const now = Date.now();
+    const now = metricsNow;
 
     return {
       total: bookings.length,
@@ -378,7 +386,7 @@ export default function BookingsPage() {
           booking.acceptanceStatus === "PENDING_ACCEPTANCE",
       ).length,
     };
-  }, [bookings, todayKey]);
+  }, [bookings, todayKey, metricsNow]);
 
   const selectedCustomer = useMemo(
     () => selectedBooking?.customer || selectedBooking?.conversation?.customer || null,
@@ -395,7 +403,7 @@ export default function BookingsPage() {
     [selectedBooking],
   );
 
-  const currentUserId = useMemo(() => getCurrentUserId(), []);
+  const currentUserId = user?.id || "";
 
   const pendingAcceptance = Boolean(
     selectedBooking &&
@@ -413,7 +421,7 @@ export default function BookingsPage() {
 
   function chooseDate(dateKey: string) {
     setSelectedDateKey(dateKey);
-    setSelectedBooking((meetingsByDate.get(dateKey) || [])[0] || null);
+    applySelectedBooking((meetingsByDate.get(dateKey) || [])[0] || null);
     const date = parseDateKey(dateKey);
 
     if (
@@ -586,12 +594,22 @@ export default function BookingsPage() {
       {notice ? <Notice tone="success">{notice}</Notice> : null}
       {error ? <Notice tone="danger">{error}</Notice> : null}
 
+      {!loading && bookings.length === 0 ? (
+        <Surface className="flex min-h-[220px] items-center justify-center p-8">
+          <EmptyState
+            icon={<CalendarCheck size={34} />}
+            title="No meetings yet"
+            description="Scheduled meetings will appear here once they are created."
+          />
+        </Surface>
+      ) : null}
+
       <section className="grid items-start gap-6 xl:grid-cols-[minmax(240px,1fr)_minmax(0,4fr)]">
         <MeetingsTodayPanel
           meetings={todayMeetings}
           selectedId={selectedBooking?.id || ""}
           loading={loading}
-          onSelect={setSelectedBooking}
+          onSelect={applySelectedBooking}
           onCreate={() => openCreateMeeting(todayKey)}
         />
 
@@ -611,7 +629,7 @@ export default function BookingsPage() {
             setSelectedDateKey(todayKey);
           }}
           onSelectDate={chooseDate}
-          onSelectMeeting={setSelectedBooking}
+          onSelectMeeting={applySelectedBooking}
           onCreate={() => openCreateMeeting(selectedDateKey)}
         />
       </section>
@@ -630,7 +648,10 @@ export default function BookingsPage() {
           canAccept={canAccept}
           onNotesChange={setNotesDraft}
           onProposalChange={setProposalDraft}
-          onOutcomeChange={setOutcomeDraft}
+          onOutcomeChange={(value) => {
+            setOutcomeDraft(value);
+            void updateBooking({ outcome: value || null }, "Meeting outcome updated.");
+          }}
           onAccept={() => void acceptMeeting()}
           onComplete={() =>
             void updateBooking({ status: "COMPLETED" }, "Meeting completed.")
@@ -1229,16 +1250,13 @@ function MeetingRecord({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {pendingAcceptance ? (
+            {pendingAcceptance && canAccept ? (
               <button
                 type="button"
                 onClick={onAccept}
-                disabled={working || !canAccept}
-                title={
-                  canAccept
-                    ? "Accept this meeting"
-                    : "Only the assigned employee can accept this meeting"
-                }
+                disabled={working}
+                aria-label="Accept meeting"
+                title="Accept this meeting"
                 className="flex h-11 items-center gap-2 rounded-2xl bg-emerald-400 px-4 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <CheckCircle2 size={16} />
@@ -1301,9 +1319,10 @@ function MeetingRecord({
               <button
                 type="button"
                 onClick={onOpenCall}
+                aria-label="Open related call"
                 className="flex items-center gap-2 text-sm font-medium text-cyan-100/75 hover:text-cyan-100"
               >
-                Open original call record
+                Open related call
                 <ArrowRight size={14} />
               </button>
             ) : (
@@ -1361,6 +1380,7 @@ function MeetingRecord({
 
           <MeetingRow label="Outcome" icon={<CalendarCheck size={18} />} last>
             <select
+              aria-label="Outcome"
               value={outcomeDraft}
               onChange={(event) =>
                 onOutcomeChange(event.target.value as MeetingOutcome)
@@ -2034,23 +2054,6 @@ function normalizeOutcome(value?: string | null): MeetingOutcome {
     return value;
   }
   return "";
-}
-
-function getCurrentUserId(): string {
-  try {
-    const token = localStorage.getItem("airadesk_token");
-    if (!token) return "";
-
-    const payloadPart = token.split(".")[1];
-    if (!payloadPart) return "";
-
-    const normalized = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const payload = JSON.parse(atob(padded));
-    return String(payload.userId || payload.sub || "");
-  } catch {
-    return "";
-  }
 }
 
 function formatEnum(value?: string | null): string {

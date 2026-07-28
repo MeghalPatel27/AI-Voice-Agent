@@ -9,6 +9,12 @@ import {
   schemasEquivalent,
   validateRemoteToolSchemas,
 } from "../src/integrations/hume/humeToolSchemas";
+import {
+  HUME_SYSTEM_PROMPT_CHECKSUM,
+  HUME_SYSTEM_PROMPT_TEXT,
+  HUME_SYSTEM_PROMPT_VERSION,
+  computePromptChecksum,
+} from "../src/integrations/hume/humeSystemPrompt";
 
 type RemoteTool = {
   id: string;
@@ -68,6 +74,10 @@ async function fetchLatestConfigVersion(configId: string) {
 
 function redactParameters(parameters: unknown) {
   return parameters;
+}
+
+function readRemotePromptText(remote: any) {
+  return String(remote?.prompt?.text || remote?.system_prompt || "").trim();
 }
 
 async function listAllTools(): Promise<RemoteTool[]> {
@@ -199,6 +209,11 @@ async function main() {
     configId: config.configId,
     configName: remote?.name ?? null,
     configVersionBefore,
+    promptVersionBefore: remote?.prompt?.version ?? null,
+    promptChecksumBefore: computePromptChecksum(readRemotePromptText(remote)),
+    promptVersionAfter: HUME_SYSTEM_PROMPT_VERSION,
+    promptChecksumAfter: HUME_SYSTEM_PROMPT_CHECKSUM,
+    promptChanged: computePromptChecksum(readRemotePromptText(remote)) !== HUME_SYSTEM_PROMPT_CHECKSUM,
     duplicateToolNames: duplicateNames,
     toolDiffs: diffs,
     configVersionBodyPreview: buildConfigVersionBody(
@@ -229,8 +244,31 @@ async function main() {
     diff.versionBefore = created.version - 1;
   }
 
+  let promptRef = remote?.prompt;
+  const remotePromptText = readRemotePromptText(remote);
+  if (
+    promptRef?.id &&
+    computePromptChecksum(remotePromptText) !== HUME_SYSTEM_PROMPT_CHECKSUM
+  ) {
+    const createdPrompt = (await humeRequest(`/v0/evi/prompts/${promptRef.id}`, {
+      method: "POST",
+      body: {
+        text: HUME_SYSTEM_PROMPT_TEXT,
+        version_description: `AiraDesk canonical prompt ${HUME_SYSTEM_PROMPT_VERSION}`,
+      },
+    })) as any;
+    promptRef = {
+      ...promptRef,
+      version: createdPrompt?.version ?? promptRef.version,
+      id: createdPrompt?.id ?? promptRef.id,
+    };
+  }
+
   const configBody = buildConfigVersionBody(
-    remote,
+    {
+      ...remote,
+      prompt: promptRef || remote?.prompt,
+    },
     attachedTools.map((tool) => ({
       id: tool.id,
       version: updatedToolVersions.get(tool.id) ?? tool.version,
@@ -250,6 +288,8 @@ async function main() {
     configVersionBefore,
     configVersionAfter: createdConfig?.version ?? refreshed?.version ?? null,
     promptPreserved: Boolean(configBody.prompt?.id),
+    promptVersionApplied: configBody.prompt?.version ?? null,
+    promptChecksumApplied: HUME_SYSTEM_PROMPT_CHECKSUM,
     voicePreserved: configBody.voice?.name === "Kora" || configBody.voice?.name === remote?.voice?.name,
     languageModelPreserved:
       configBody.language_model?.model_resource === remote?.language_model?.model_resource,

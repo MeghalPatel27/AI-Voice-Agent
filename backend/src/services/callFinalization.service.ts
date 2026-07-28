@@ -3,8 +3,19 @@ import type {
   CallPostAnalysisStatus,
   CallStatus,
   Prisma,
+  TaskStatus,
 } from "@prisma/client";
 import { prisma } from "../db/prisma";
+import {
+  extractRelatedTaskId,
+  mapCallStatusToTaskTerminal,
+  isSuccessfulTerminalStatus,
+} from "./callLifecycleTaskSync";
+import {
+  parseScheduledCallContext,
+  stringifyScheduledCallContext,
+  AI_CALL_TASK_KIND,
+} from "./aiScheduledCallContext";
 
 export type DbCallStatus = CallStatus;
 
@@ -59,6 +70,9 @@ export type FinalizeCallResult = {
   analysisQueued: boolean;
   status: DbCallStatus | null;
   transcript: string | null;
+  taskId: string | null;
+  taskStatus: TaskStatus | null;
+  taskUpdated: boolean;
 };
 
 function finalizeLog(
@@ -326,6 +340,9 @@ export async function finalizeCall(
       analysisQueued: false,
       status: null,
       transcript: null,
+      taskId: null,
+      taskStatus: null,
+      taskUpdated: false,
     };
   }
 
@@ -347,6 +364,9 @@ export async function finalizeCall(
       analysisQueued: false,
       status: null,
       transcript: null,
+      taskId: null,
+      taskStatus: null,
+      taskUpdated: false,
     };
   }
 
@@ -367,6 +387,9 @@ export async function finalizeCall(
       analysisQueued: false,
       status: null,
       transcript: null,
+      taskId: null,
+      taskStatus: null,
+      taskUpdated: false,
     };
   }
 
@@ -423,16 +446,17 @@ export async function finalizeCall(
 
   const durationSeconds =
     Number.isFinite(input.durationSeconds) &&
-    (input.durationSeconds as number) > 0
-      ? (input.durationSeconds as number)
+    (input.durationSeconds as number) >= 0
+      ? Math.max(0, Math.round(input.durationSeconds as number))
       : call.startedAt != null
         ? Math.max(
+            0,
             call.durationSeconds || 0,
             Math.round(
               (endedAt.getTime() - new Date(call.startedAt).getTime()) / 1000,
             ),
           )
-        : call.durationSeconds || 0;
+        : Math.max(0, call.durationSeconds || 0);
 
   const existingAnalysis = call.postAnalysis;
   const shouldQueueAnalysis =
@@ -453,6 +477,10 @@ export async function finalizeCall(
     Date.now() + (Number.isFinite(settlingMs) ? Math.max(0, settlingMs) : 8_000),
   );
 
+  let taskId: string | null = null;
+  let taskStatus: TaskStatus | null = null;
+  let taskUpdated = false;
+
   await prisma.$transaction(async (tx) => {
     const metadata = {
       ...((call.metadata as Record<string, unknown>) || {}),
@@ -463,6 +491,10 @@ export async function finalizeCall(
       twilioStatus:
         input.providerStatus ||
         ((call.metadata as Record<string, unknown>) || {}).twilioStatus ||
+        null,
+      taskId:
+        extractRelatedTaskId(call.metadata) ||
+        ((call.metadata as Record<string, unknown>) || {}).taskId ||
         null,
     };
 
@@ -506,7 +538,7 @@ export async function finalizeCall(
           ? transcript.split("\n").slice(-1)[0]?.slice(0, 300) ||
             conversation.lastMessage
           : conversation.lastMessage,
-        lastMessageAt: new Date(),
+        lastMessageAt: transcript ? new Date() : conversation.lastMessageAt,
       },
     });
 
@@ -575,6 +607,115 @@ export async function finalizeCall(
         },
       });
     }
+
+    // Synchronize related scheduled AI-call Task inside the same transaction.
+    const relatedTaskId = extractRelatedTaskId(call.metadata);
+    let relatedTask = relatedTaskId
+      ? await tx.task.findFirst({
+          where: { id: relatedTaskId, companyId },
+        })
+      : null;
+
+    if (!relatedTask) {
+      const candidates = await tx.task.findMany({
+        where: {
+          companyId,
+          conversationId: conversation.id,
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 10,
+      });
+      relatedTask =
+        candidates.find((candidate) => {
+          const notes = parseScheduledCallContext(candidate.aiNotes);
+          if (!notes || notes.kind !== AI_CALL_TASK_KIND) return false;
+          const sid = call.providerCallId || call.twilioCallSid;
+          if (sid && notes.callSid && notes.callSid === sid) return true;
+          return (
+            candidate.status === "DOING" ||
+            ["CALLING", "RINGING", "IN_PROGRESS", "CONNECTED"].includes(
+              notes.status,
+            )
+          );
+        }) || null;
+    }
+
+    if (relatedTask) {
+      const notes = parseScheduledCallContext(relatedTask.aiNotes);
+      if (notes && notes.kind === AI_CALL_TASK_KIND) {
+        const skipPreDialFailure =
+          relatedTask.status === "BLOCKED" &&
+          notes.status === "FAILED" &&
+          !notes.callSid &&
+          !isSuccessfulTerminalStatus(nextStatus);
+
+        const mapped = mapCallStatusToTaskTerminal(nextStatus);
+        const reopenBlocked =
+          relatedTask.status === "DONE" && mapped.taskStatus !== "DONE";
+
+        if (!skipPreDialFailure && !reopenBlocked) {
+          const alreadyDesired =
+            relatedTask.status === mapped.taskStatus &&
+            relatedTask.status !== "DOING" &&
+            (notes.status === mapped.notesStatus ||
+              (mapped.taskStatus === "DONE" && notes.status === "COMPLETED"));
+
+          if (!alreadyDesired) {
+            const terminalAt = relatedTask.completedAt || endedAt;
+            await tx.task.update({
+              where: { id: relatedTask.id },
+              data: {
+                status: mapped.taskStatus,
+                completedAt: relatedTask.completedAt || terminalAt,
+                blockedReason:
+                  mapped.taskStatus === "DONE"
+                    ? null
+                    : (
+                        call.failureReason ||
+                        endReason ||
+                        `Call ended: ${nextStatus}`
+                      ).slice(0, 450),
+                conversationId:
+                  relatedTask.conversationId || conversation.id,
+                aiNotes: stringifyScheduledCallContext({
+                  ...notes,
+                  status: mapped.notesStatus,
+                  conversationId:
+                    notes.conversationId || conversation.id,
+                  callSid:
+                    notes.callSid ||
+                    call.providerCallId ||
+                    call.twilioCallSid ||
+                    null,
+                  completedAt:
+                    notes.completedAt || terminalAt.toISOString(),
+                  failedAt:
+                    mapped.taskStatus === "DONE"
+                      ? notes.failedAt || null
+                      : notes.failedAt || terminalAt.toISOString(),
+                  error:
+                    mapped.taskStatus === "DONE"
+                      ? null
+                      : (
+                          call.failureReason ||
+                          endReason ||
+                          `Call ended: ${nextStatus}`
+                        ).slice(0, 450),
+                }),
+              },
+            });
+            taskUpdated = true;
+            taskStatus = mapped.taskStatus;
+          } else {
+            taskStatus = relatedTask.status;
+          }
+          taskId = relatedTask.id;
+        } else {
+          taskId = relatedTask.id;
+          taskStatus = relatedTask.status;
+        }
+      }
+    }
   });
 
   finalizeLog("call_finalized", {
@@ -586,6 +727,9 @@ export async function finalizeCall(
     status: nextStatus,
     alreadyTerminal,
     analysisQueued: !existingAnalysis || analysisQueued,
+    taskId,
+    taskStatus,
+    taskUpdated,
   });
 
   if (!existingAnalysis) {
@@ -604,6 +748,9 @@ export async function finalizeCall(
     analysisQueued: !existingAnalysis,
     status: nextStatus,
     transcript: transcript || call.transcript,
+    taskId,
+    taskStatus,
+    taskUpdated,
   };
 }
 

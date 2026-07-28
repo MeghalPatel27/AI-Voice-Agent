@@ -132,6 +132,39 @@ npm run hume:configure -- --apply
 npm run hume:validate-config
 ```
 
+Dry-run/apply must report prompt metadata only (version/checksum change and preservation checks), without printing secrets or tenant private data.
+
+## Config vs Prompt Version Fields
+
+`npm run hume:validate-config` reports these separately:
+
+| Field | Meaning |
+| --- | --- |
+| `humeConfigId` | Redacted active EVI config identifier |
+| `humeConfigVersion` | Remote EVI **configuration** revision (for example `2`) |
+| `humePromptId` | Redacted prompt resource identifier attached to the config |
+| `humePromptRemoteVersion` | Remote **prompt** revision on Hume (for example `1`) |
+| `localCanonicalPromptVersion` | Repository canonical prompt label (for example `2026-07-28.1`) |
+| `localCanonicalPromptChecksum` / `remotePromptChecksum` | Canonical prompt integrity check |
+
+Do not describe `humePromptRemoteVersion` or `localCanonicalPromptVersion` as "config version". A low config revision after migration does not imply prompt regression when checksums match.
+
+## Canonical Prompt Source
+
+- Source of truth: `backend/src/integrations/hume/humeSystemPrompt.ts`
+- Exports:
+  - `HUME_SYSTEM_PROMPT_TEXT`
+  - `HUME_SYSTEM_PROMPT_VERSION`
+  - `HUME_SYSTEM_PROMPT_CHECKSUM`
+- The prompt is global behavior only. Company details and call objectives are injected dynamically via `airadesk_get_call_context`.
+- Do not hardcode tenant company names or customer data in this global prompt.
+
+## Prompt Responsibilities vs Call Objective
+
+- Global prompt controls: identity/disclosure, safety, tool sequencing, opt-out behavior, non-deception, and hang-up policy.
+- Call objective controls: `collectionGoal`, `callPurpose`, `extraNotes`, language, schedule details.
+- Changing one scheduled call objective must not require global prompt edits.
+
 ## Hume Data Retention Confirmation
 
 Hume does not expose data retention through the validation API. After confirming retention is ON in the Hume dashboard, set:
@@ -156,7 +189,8 @@ The validator reports `dataRetention: USER_CONFIRMED_ON` when this operational f
 - Frontend must handle "Recording is being prepared" during Hume reconstruction.
 
 ## Transcript Sync Behavior
-- On `chat_ended`: persist lifecycle + enqueue sync job + return 200 quickly.
+- On `chat_ended`: persist lifecycle, finalize Call/Task, enqueue sync job, return 200 quickly.
+- See `docs/integrations/CALL_LIFECYCLE_AND_TASK_SYNC.md` for Call/Task terminalization rules.
 - Worker fetches paginated Hume events, persists transcript messages idempotently, updates `Call.transcript`.
 
 ## Expression vs Lead Intent

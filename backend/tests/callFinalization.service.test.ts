@@ -7,6 +7,9 @@ const {
   customerUpdateMock,
   analysisCreateMock,
   analysisUpdateMock,
+  taskFindFirstMock,
+  taskFindManyMock,
+  taskUpdateMock,
   transactionMock,
 } = vi.hoisted(() => ({
   findFirstMock: vi.fn(),
@@ -15,6 +18,9 @@ const {
   customerUpdateMock: vi.fn(),
   analysisCreateMock: vi.fn(),
   analysisUpdateMock: vi.fn(),
+  taskFindFirstMock: vi.fn(),
+  taskFindManyMock: vi.fn(),
+  taskUpdateMock: vi.fn(),
   transactionMock: vi.fn(),
 }));
 
@@ -48,6 +54,7 @@ function makeCall(overrides: Record<string, unknown> = {}) {
     endReason: null,
     failureReason: null,
     providerCallId: "CA123",
+    twilioCallSid: "CA123",
     direction: "INBOUND",
     metadata: {},
     postAnalysis: null,
@@ -60,6 +67,7 @@ function makeCall(overrides: Record<string, unknown> = {}) {
       aiConfidence: 0,
       nextAction: null,
       lastMessage: null,
+      lastMessageAt: null,
       bookingCreated: false,
       customerId: "cust_1",
       customer: {
@@ -83,6 +91,25 @@ function makeCall(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   };
+}
+
+function mockTx() {
+  transactionMock.mockImplementation(async (fn: any) =>
+    fn({
+      call: { update: callUpdateMock },
+      conversation: { update: conversationUpdateMock },
+      customer: { update: customerUpdateMock },
+      callPostAnalysis: {
+        create: analysisCreateMock,
+        update: analysisUpdateMock,
+      },
+      task: {
+        findFirst: taskFindFirstMock,
+        findMany: taskFindManyMock,
+        update: taskUpdateMock,
+      },
+    }),
+  );
 }
 
 describe("call status mapping", () => {
@@ -112,17 +139,9 @@ describe("call status mapping", () => {
 describe("finalizeCall", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    transactionMock.mockImplementation(async (fn: any) =>
-      fn({
-        call: { update: callUpdateMock },
-        conversation: { update: conversationUpdateMock },
-        customer: { update: customerUpdateMock },
-        callPostAnalysis: {
-          create: analysisCreateMock,
-          update: analysisUpdateMock,
-        },
-      }),
-    );
+    mockTx();
+    taskFindFirstMock.mockResolvedValue(null);
+    taskFindManyMock.mockResolvedValue([]);
   });
 
   it("finalizes an ongoing call from a customer-end event and queues analysis", async () => {
@@ -148,6 +167,48 @@ describe("finalizeCall", () => {
     );
   });
 
+  it("terminalizes related scheduled Task when Call completes", async () => {
+    findFirstMock.mockResolvedValue(
+      makeCall({
+        metadata: { taskId: "task_1" },
+        direction: "OUTBOUND",
+      }),
+    );
+    taskFindFirstMock.mockResolvedValue({
+      id: "task_1",
+      status: "DOING",
+      completedAt: null,
+      conversationId: "conv_1",
+      aiNotes: JSON.stringify({
+        kind: "AI_SCHEDULED_CALL",
+        version: 2,
+        status: "RINGING",
+        phone: "+15551234567",
+        collectionGoal: "Collect requirements",
+        preferredLanguage: "AUTO",
+        scheduledAt: "2026-07-28T10:00:00.000Z",
+        timezone: "Asia/Kolkata",
+        callSid: "CA123",
+        conversationId: "conv_1",
+      }),
+    });
+
+    const result = await finalizeCall({
+      providerCallId: "CA123",
+      endReason: "twilio_status_completed",
+      providerStatus: "completed",
+      terminalStatus: "COMPLETED",
+    });
+
+    expect(result.taskUpdated).toBe(true);
+    expect(result.taskStatus).toBe("DONE");
+    expect(taskUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "DONE" }),
+      }),
+    );
+  });
+
   it("finalizes from an AI hangup reason", async () => {
     findFirstMock.mockResolvedValue(makeCall());
 
@@ -169,17 +230,9 @@ describe("finalizeCall", () => {
       ["no-answer", "MISSED"],
     ] as const) {
       vi.clearAllMocks();
-      transactionMock.mockImplementation(async (fn: any) =>
-        fn({
-          call: { update: callUpdateMock },
-          conversation: { update: conversationUpdateMock },
-          customer: { update: customerUpdateMock },
-          callPostAnalysis: {
-            create: analysisCreateMock,
-            update: analysisUpdateMock,
-          },
-        }),
-      );
+      mockTx();
+      taskFindFirstMock.mockResolvedValue(null);
+      taskFindManyMock.mockResolvedValue([]);
       findFirstMock.mockResolvedValue(makeCall({ status: "RINGING" }));
 
       const result = await finalizeCall({

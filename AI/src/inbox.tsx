@@ -8,7 +8,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  AlertTriangle,
   Bot,
   CalendarCheck,
   ChevronDown,
@@ -516,14 +515,14 @@ function cleanCustomerNeed(value?: string | null) {
   if (jsonPurpose) candidate = jsonPurpose;
 
   const labelledPurpose = candidate.match(
-    /\b(?:purpose|primary need|customer need|what the customer needs|requirement)\s*[:\-]\s*([\s\S]*?)(?=(?:\n|[;|•·,])\s*(?:phone(?: number)?|number|status|language|scheduled(?: at| for)?|started|completed|call sid|provider|task id|notes?)\s*[:\-]|$)/i,
+    /\b(?:purpose|primary need|customer need|what the customer needs|requirement)\s*[:-]\s*([\s\S]*?)(?=(?:\n|[;|•·,])\s*(?:phone(?: number)?|number|status|language|scheduled(?: at| for)?|started|completed|call sid|provider|task id|notes?)\s*[:-]|$)/i,
   );
 
   if (labelledPurpose?.[1]) {
     candidate = labelledPurpose[1].trim();
   }
 
-  const noiseLine = /^(?:phone(?: number)?|number|status|language|scheduled(?: at| for)?|started|completed|call sid|provider|task id|notes?)\s*[:\-]/i;
+  const noiseLine = /^(?:phone(?: number)?|number|status|language|scheduled(?: at| for)?|started|completed|call sid|provider|task id|notes?)\s*[:-]/i;
 
   candidate = candidate
     .split(/\r?\n|[|•]+/)
@@ -531,7 +530,7 @@ function cleanCustomerNeed(value?: string | null) {
     .filter(Boolean)
     .filter((line) => !noiseLine.test(line))
     .join(" ")
-    .replace(/^(?:purpose|primary need|customer need|requirement)\s*[:\-]\s*/i, "")
+    .replace(/^(?:purpose|primary need|customer need|requirement)\s*[:-]\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -584,19 +583,6 @@ function normalizeComparableText(value?: string | null) {
     .toLowerCase()
     .replace(/\s+/g, " ")
     .replace(/[^\p{L}\p{N}\s]/gu, "");
-}
-
-function uniqueTextItems(values: Array<string | null | undefined>) {
-  const seen = new Set<string>();
-
-  return values
-    .map((value) => String(value || "").trim())
-    .filter((value) => {
-      const key = normalizeComparableText(value);
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
 }
 
 function startOfLocalDay(value: Date) {
@@ -1263,7 +1249,11 @@ export default function InboxPage() {
   }, [loadInbox]);
 
   useEffect(() => {
-    void loadMeetingAssignmentData();
+    const timer = window.setTimeout(() => {
+      void loadMeetingAssignmentData();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   const latestCallStatus = selectedConversation?.latestCall?.status;
@@ -2240,6 +2230,8 @@ function MeetingAssignmentPrompt({
   working: boolean;
   onSend: (booking: Booking, employee: TeamUser) => void | Promise<void>;
 }) {
+  const [assignmentNow] = useState(() => Date.now());
+
   const meeting = useMemo(() => {
     const conversationMeeting =
       meetings
@@ -2249,7 +2241,7 @@ function MeetingAssignmentPrompt({
           }
 
           const meetingTime = new Date(booking.dateTime).getTime();
-          return !Number.isNaN(meetingTime) && meetingTime >= Date.now();
+          return !Number.isNaN(meetingTime) && meetingTime >= assignmentNow;
         })
         .sort(compareBookingDate)[0] || null;
 
@@ -2259,7 +2251,7 @@ function MeetingAssignmentPrompt({
       allBookings.find((booking) => booking.id === conversationMeeting.id) ||
       conversationMeeting
     );
-  }, [meetings, allBookings]);
+  }, [meetings, allBookings, assignmentNow]);
 
   const availableEmployees = useMemo(() => {
     if (!meeting) return [];
@@ -2274,21 +2266,25 @@ function MeetingAssignmentPrompt({
   const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
 
   useEffect(() => {
-    if (!meeting || meeting.assignedUserId) {
-      setSelectedEmployeeId("");
-      return;
-    }
-
-    setSelectedEmployeeId((current) => {
-      if (
-        current &&
-        availableEmployees.some((employee) => employee.id === current)
-      ) {
-        return current;
+    const timer = window.setTimeout(() => {
+      if (!meeting || meeting.assignedUserId) {
+        setSelectedEmployeeId("");
+        return;
       }
 
-      return availableEmployees[0]?.id || "";
-    });
+      setSelectedEmployeeId((current) => {
+        if (
+          current &&
+          availableEmployees.some((employee) => employee.id === current)
+        ) {
+          return current;
+        }
+
+        return availableEmployees[0]?.id || "";
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, [meeting, availableEmployees]);
 
   if (!meeting) return null;

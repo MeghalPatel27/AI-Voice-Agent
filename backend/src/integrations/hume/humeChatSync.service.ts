@@ -59,11 +59,42 @@ function parseEmotionFeatures(raw: unknown): Record<string, number> {
 }
 
 export async function enqueueHumeSyncJob(callId: string, chatId: string, companyId: string) {
-  await prisma.humeChatSyncJob.upsert({
+  const existing = await prisma.humeChatSyncJob.findUnique({
     where: { callId_chatId: { callId, chatId } },
-    create: { callId, chatId, companyId, status: "PENDING", nextAttemptAt: new Date() },
-    update: { status: "PENDING", nextAttemptAt: new Date() },
   });
+
+  if (!existing) {
+    try {
+      await prisma.humeChatSyncJob.create({
+        data: {
+          callId,
+          chatId,
+          companyId,
+          status: "PENDING",
+          nextAttemptAt: new Date(),
+        },
+      });
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String((error as { code?: string }).code)
+          : "";
+      if (code !== "P2002") throw error;
+    }
+    return;
+  }
+
+  // Idempotent: only re-queue failed jobs. Never reopen COMPLETED/PROCESSING.
+  if (existing.status === "FAILED") {
+    await prisma.humeChatSyncJob.update({
+      where: { id: existing.id },
+      data: {
+        status: "PENDING",
+        nextAttemptAt: new Date(),
+        lastError: null,
+      },
+    });
+  }
 }
 
 export async function runHumeSyncWorkerOnce(limit = 5) {
@@ -209,6 +240,7 @@ export async function runHumeSyncWorkerOnce(limit = 5) {
         endReason: call.humeEndReason || "hume_chat_ended",
         markCompleted: true,
       });
+      // Task sync happens inside finalizeCall; post-call jobs already queued by chat_ended.
       completed += 1;
     } catch (error) {
       const attempts = job.attempts + 1;

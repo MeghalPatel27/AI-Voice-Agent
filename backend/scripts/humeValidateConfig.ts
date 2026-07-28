@@ -4,6 +4,11 @@ import {
   REQUIRED_HUME_TOOLS,
   validateRemoteToolSchemas,
 } from "../src/integrations/hume/humeToolSchemas";
+import {
+  HUME_SYSTEM_PROMPT_CHECKSUM,
+  HUME_SYSTEM_PROMPT_VERSION,
+  computePromptChecksum,
+} from "../src/integrations/hume/humeSystemPrompt";
 
 const REQUIRED_EVENTS = ["chat_started", "chat_ended", "tool_call"] as const;
 
@@ -18,6 +23,13 @@ function redactWebhookUrl(url: string) {
   } catch {
     return "invalid_url";
   }
+}
+
+function redactHumeConfigId(configId: string | null | undefined) {
+  const value = String(configId || "").trim();
+  if (!value) return null;
+  if (value.length <= 12) return `${value.slice(0, 4)}…`;
+  return `${value.slice(0, 8)}…${value.slice(-4)}`;
 }
 
 function extractVersions(payload: any) {
@@ -147,6 +159,8 @@ async function main() {
   );
 
   const report = {
+    promptVersionExpected: HUME_SYSTEM_PROMPT_VERSION,
+    promptChecksumExpected: HUME_SYSTEM_PROMPT_CHECKSUM,
     validationStatus:
       missingEvents.length === 0 &&
       toolIssues.length === 0 &&
@@ -155,9 +169,20 @@ async function main() {
         ? "passed"
         : "failed",
     configExists: true,
+    humeConfigId: redactHumeConfigId(config.configId),
+    humeConfigVersion: remote?.version ?? null,
     configName: remote?.name || null,
-    configVersion: remote?.version ?? null,
     eviVersion: remote?.evi_version || remote?.eviVersion || "unknown",
+    humePromptId: redactHumeConfigId(remote?.prompt?.id || null),
+    humePromptRemoteVersion: remote?.prompt?.version ?? null,
+    localCanonicalPromptVersion: HUME_SYSTEM_PROMPT_VERSION,
+    localCanonicalPromptChecksum: HUME_SYSTEM_PROMPT_CHECKSUM,
+    remotePromptChecksum: computePromptChecksum(
+      String(remote?.prompt?.text || remote?.system_prompt || ""),
+    ),
+    promptChecksumMatch:
+      computePromptChecksum(String(remote?.prompt?.text || remote?.system_prompt || "")) ===
+      HUME_SYSTEM_PROMPT_CHECKSUM,
     voiceNameOrId:
       remote?.voice?.name ||
       remote?.voice?.id ||
@@ -177,6 +202,38 @@ async function main() {
       remote?.model?.provider ||
       null,
     promptPresent: Boolean(remote?.prompt?.text || remote?.system_prompt),
+    promptRules: {
+      contextToolInstruction: /airadesk_get_call_context/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      collectionGoalInstruction: /collectionGoal/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      privateNoteInstruction: /extraNotes|private note/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      nonDeceptionInstruction: /never claim to be human|impersonate/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      truthfulAiAnswerInstruction: /AI-powered virtual calling assistant/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      companyPurposeOpeningInstruction: /outbound calls.*company name.*reason/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      leadCaptureInstruction: /airadesk_capture_lead_details/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      meetingToolInstruction: /airadesk_schedule_meeting/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      optOutInstruction: /opt-?out|not to contact/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+      hangupInstruction: /hang_up/i.test(
+        String(remote?.prompt?.text || remote?.system_prompt || ""),
+      ),
+    },
     webhookConfigured: Boolean(webhook?.url || webhook?.callback_url),
     webhookDestination: redactWebhookUrl(
       String(webhook?.url || webhook?.callback_url || ""),
@@ -200,7 +257,12 @@ async function main() {
 
   console.log(JSON.stringify(report, null, 2));
 
-  if (report.validationStatus !== "passed") {
+  const promptRulesPassed = Object.values(report.promptRules).every(Boolean);
+  if (
+    report.validationStatus !== "passed" ||
+    !report.promptChecksumMatch ||
+    !promptRulesPassed
+  ) {
     process.exitCode = 1;
   }
 }
