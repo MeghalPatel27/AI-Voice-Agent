@@ -39,6 +39,7 @@ async function runScript(argv: string[], env: Record<string, string | undefined>
   vi.stubGlobal("process", {
     ...process,
     argv: ["node", "verifyScheduledCallContext.ts", ...argv],
+    version: process.version.startsWith("v24.") ? process.version : "v24.18.0",
     env: {
       ...process.env,
       NODE_ENV: "development",

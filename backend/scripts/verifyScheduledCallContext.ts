@@ -147,7 +147,6 @@ async function ensureSeedRecords(companyId: string, createdByUserId?: string | n
 
 async function main() {
   const apply = process.argv.includes("--apply");
-  assertNode24();
 
   if (!apply) {
     console.log(
@@ -171,6 +170,7 @@ async function main() {
     return;
   }
 
+  assertNode24();
   assertDevelopmentGates(true);
   assertDevelopmentDatabase();
 
