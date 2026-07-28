@@ -145,6 +145,14 @@ type Call = {
   } | null;
 };
 
+type TeamUser = {
+  id: string;
+  name: string;
+  email?: string | null;
+  role?: string;
+  isActive?: boolean;
+};
+
 type Task = {
   id: string;
   title: string;
@@ -156,12 +164,7 @@ type Task = {
   priority: string;
   status: string;
   delayed?: boolean;
-  assignedUser?: {
-    id: string;
-    name: string;
-    email: string;
-    role: string;
-  } | null;
+  assignedUser?: TeamUser | null;
   scheduledCall?: {
     taskId?: string;
     status?: string | null;
@@ -197,7 +200,27 @@ type Booking = {
   title: string;
   dateTime?: string | null;
   status: string;
+  assignedUserId?: string | null;
+  assignedUser?: TeamUser | null;
+  owner?: string | null;
+  acceptanceStatus?: string | null;
+  acceptedAt?: string | null;
+  acceptedByUserId?: string | null;
   createdAt: string;
+};
+
+type BookingsResponse = {
+  bookings: Booking[];
+};
+
+type BookingResponse = {
+  message?: string;
+  booking?: Booking;
+};
+
+type TeamResponse = {
+  teamMembers?: TeamUser[];
+  members?: Array<TeamUser & { type?: string }>;
 };
 
 type TimelineItem = {
@@ -635,6 +658,46 @@ function bookingDisplayStatus(status?: string | null) {
   return formatEnum(value || "NOT_SCHEDULED");
 }
 
+const DEFAULT_MEETING_DURATION_MINUTES = 60;
+
+function isMeetingOpenForAssignment(booking: Booking) {
+  const status = String(booking.status || "").toUpperCase();
+  return !["CANCELLED", "COMPLETED", "NO_SHOW"].includes(status);
+}
+
+function employeeHasMeetingConflict(
+  employeeId: string,
+  targetBooking: Booking,
+  allBookings: Booking[],
+) {
+  if (!targetBooking.dateTime) return false;
+
+  const targetStart = new Date(targetBooking.dateTime).getTime();
+  if (Number.isNaN(targetStart)) return false;
+
+  const targetEnd =
+    targetStart + DEFAULT_MEETING_DURATION_MINUTES * 60 * 1000;
+
+  return allBookings.some((booking) => {
+    if (
+      booking.id === targetBooking.id ||
+      booking.assignedUserId !== employeeId ||
+      !booking.dateTime ||
+      !isMeetingOpenForAssignment(booking)
+    ) {
+      return false;
+    }
+
+    const bookingStart = new Date(booking.dateTime).getTime();
+    if (Number.isNaN(bookingStart)) return false;
+
+    const bookingEnd =
+      bookingStart + DEFAULT_MEETING_DURATION_MINUTES * 60 * 1000;
+
+    return targetStart < bookingEnd && bookingStart < targetEnd;
+  });
+}
+
 function countWords(value: string) {
   return value.trim() ? value.trim().split(/\s+/).length : 0;
 }
@@ -818,6 +881,10 @@ export default function InboxPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  const [teamMembers, setTeamMembers] = useState<TeamUser[]>([]);
+  const [allBookings, setAllBookings] = useState<Booking[]>([]);
+  const [assignmentWorking, setAssignmentWorking] = useState(false);
+
   const [showWhatsAppStart, setShowWhatsAppStart] = useState(false);
   const [whatsAppName, setWhatsAppName] = useState("");
   const [whatsAppPhone, setWhatsAppPhone] = useState("");
@@ -904,6 +971,28 @@ export default function InboxPage() {
       );
     } finally {
       setLoadingDetail(false);
+    }
+  }
+
+  async function loadMeetingAssignmentData() {
+    const [teamResult, bookingsResult] = await Promise.allSettled([
+      apiFetch<TeamResponse>("/api/team/overview"),
+      apiFetch<BookingsResponse>("/api/bookings"),
+    ]);
+
+    if (teamResult.status === "fulfilled") {
+      const data = teamResult.value;
+      const members =
+        data.teamMembers ||
+        (data.members || []).filter((member) => member.type !== "UNASSIGNED");
+
+      setTeamMembers(
+        members.filter((member) => member.isActive !== false),
+      );
+    }
+
+    if (bookingsResult.status === "fulfilled") {
+      setAllBookings(bookingsResult.value.bookings || []);
     }
   }
 
@@ -1088,6 +1177,48 @@ export default function InboxPage() {
     }
   }
 
+  async function sendEmployeeAvailabilityRequest(
+    booking: Booking,
+    employee: TeamUser,
+  ) {
+    try {
+      setAssignmentWorking(true);
+      setError("");
+      setNotice("");
+
+      const data = await apiFetch<BookingResponse>(
+        `/api/bookings/${booking.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            assignedUserId: employee.id,
+          }),
+        },
+      );
+
+      setNotice(
+        `Availability request sent to ${employee.name}. The meeting is now pending their acceptance.`,
+      );
+
+      await Promise.all([
+        refreshCurrentConversation(),
+        loadMeetingAssignmentData(),
+      ]);
+
+      if (data.booking?.id && selectedId) {
+        await loadConversation(selectedId);
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to send the employee availability request",
+      );
+    } finally {
+      setAssignmentWorking(false);
+    }
+  }
+
   async function createBooking() {
     if (!selectedConversation) return;
 
@@ -1130,6 +1261,10 @@ export default function InboxPage() {
 
     return () => window.clearTimeout(timeout);
   }, [loadInbox]);
+
+  useEffect(() => {
+    void loadMeetingAssignmentData();
+  }, []);
 
   const latestCallStatus = selectedConversation?.latestCall?.status;
   const firstCallStatus = selectedConversation?.calls?.[0]?.status;
@@ -1534,7 +1669,13 @@ export default function InboxPage() {
                 <ScheduledCallSection conversation={selectedConversation} />
               ) : null}
 
-              <TaskBookingSection conversation={selectedConversation} />
+              <TaskBookingSection
+                conversation={selectedConversation}
+                teamMembers={teamMembers}
+                allBookings={allBookings}
+                assignmentWorking={assignmentWorking}
+                onSendAvailabilityRequest={sendEmployeeAvailabilityRequest}
+              />
 
               <ConversationWorkspace
                 conversation={selectedConversation}
@@ -1939,8 +2080,19 @@ function PostCallIntelligenceSection({
 
 function TaskBookingSection({
   conversation,
+  teamMembers,
+  allBookings,
+  assignmentWorking,
+  onSendAvailabilityRequest,
 }: {
   conversation: ConversationDetail;
+  teamMembers: TeamUser[];
+  allBookings: Booking[];
+  assignmentWorking: boolean;
+  onSendAvailabilityRequest: (
+    booking: Booking,
+    employee: TeamUser,
+  ) => void | Promise<void>;
 }) {
   const todayMeetings = conversation.bookings
     .filter((booking) => isSameLocalDay(booking.dateTime, new Date()))
@@ -2035,6 +2187,14 @@ function TaskBookingSection({
             </button>
           </div>
 
+          <MeetingAssignmentPrompt
+            meetings={conversation.bookings}
+            teamMembers={teamMembers}
+            allBookings={allBookings}
+            working={assignmentWorking}
+            onSend={onSendAvailabilityRequest}
+          />
+
           <MeetingGroup
             title="Meetings today"
             meetings={todayMeetings}
@@ -2064,6 +2224,230 @@ function TaskBookingSection({
         </section>
       </div>
     </PanelCard>
+  );
+}
+
+function MeetingAssignmentPrompt({
+  meetings,
+  teamMembers,
+  allBookings,
+  working,
+  onSend,
+}: {
+  meetings: Booking[];
+  teamMembers: TeamUser[];
+  allBookings: Booking[];
+  working: boolean;
+  onSend: (booking: Booking, employee: TeamUser) => void | Promise<void>;
+}) {
+  const meeting = useMemo(() => {
+    const conversationMeeting =
+      meetings
+        .filter((booking) => {
+          if (!booking.dateTime || !isMeetingOpenForAssignment(booking)) {
+            return false;
+          }
+
+          const meetingTime = new Date(booking.dateTime).getTime();
+          return !Number.isNaN(meetingTime) && meetingTime >= Date.now();
+        })
+        .sort(compareBookingDate)[0] || null;
+
+    if (!conversationMeeting) return null;
+
+    return (
+      allBookings.find((booking) => booking.id === conversationMeeting.id) ||
+      conversationMeeting
+    );
+  }, [meetings, allBookings]);
+
+  const availableEmployees = useMemo(() => {
+    if (!meeting) return [];
+
+    return teamMembers.filter(
+      (employee) =>
+        employee.isActive !== false &&
+        !employeeHasMeetingConflict(employee.id, meeting, allBookings),
+    );
+  }, [meeting, teamMembers, allBookings]);
+
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
+
+  useEffect(() => {
+    if (!meeting || meeting.assignedUserId) {
+      setSelectedEmployeeId("");
+      return;
+    }
+
+    setSelectedEmployeeId((current) => {
+      if (
+        current &&
+        availableEmployees.some((employee) => employee.id === current)
+      ) {
+        return current;
+      }
+
+      return availableEmployees[0]?.id || "";
+    });
+  }, [meeting, availableEmployees]);
+
+  if (!meeting) return null;
+
+  const assignedEmployee =
+    meeting.assignedUser ||
+    teamMembers.find((employee) => employee.id === meeting.assignedUserId) ||
+    null;
+  const acceptanceStatus = String(
+    meeting.acceptanceStatus || "",
+  ).toUpperCase();
+
+  if (meeting.assignedUserId && assignedEmployee) {
+    const accepted = acceptanceStatus === "ACCEPTED";
+
+    return (
+      <div
+        className={`mt-6 rounded-[28px] border p-5 ${
+          accepted
+            ? "border-emerald-400/20 bg-emerald-400/[0.08]"
+            : "border-amber-400/20 bg-amber-400/[0.08]"
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <div
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border ${
+              accepted
+                ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100"
+                : "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            }`}
+          >
+            <UsersRound size={18} />
+          </div>
+
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-white/42">
+              Employee confirmation
+            </p>
+            <p className="mt-2 text-sm font-semibold leading-6 text-white/82">
+              {accepted
+                ? `${assignedEmployee.name} accepted this meeting.`
+                : `Availability request sent to ${assignedEmployee.name}.`}
+            </p>
+            <p className="mt-2 text-xs leading-5 text-white/40">
+              {formatDateTime(meeting.dateTime)} ·{" "}
+              {accepted ? "Accepted" : "Pending employee acceptance"}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (teamMembers.length === 0) {
+    return (
+      <div className="mt-6 rounded-[28px] border border-dashed border-white/10 p-5">
+        <p className="text-sm font-semibold text-white/72">
+          Employee assignment
+        </p>
+        <p className="mt-2 text-sm leading-6 text-white/38">
+          The lead requested {formatDateTime(meeting.dateTime)}. Add active
+          employees to AiraDesk before sending an availability request.
+        </p>
+      </div>
+    );
+  }
+
+  const selectedEmployee =
+    availableEmployees.find(
+      (employee) => employee.id === selectedEmployeeId,
+    ) || null;
+
+  return (
+    <div className="mt-6 rounded-[28px] border border-cyan-400/20 bg-cyan-400/[0.07] p-5">
+      <div className="flex items-start gap-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-100">
+          <CalendarCheck size={18} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-100/65">
+            Meeting requested by the lead
+          </p>
+          <p className="mt-2 text-base font-semibold leading-7 text-white/86">
+            {formatDateTime(meeting.dateTime)}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-white/48">
+            AiraDesk checked the meetings already assigned in the CRM. Choose
+            an employee who appears free and send the meeting for confirmation.
+          </p>
+        </div>
+      </div>
+
+      {availableEmployees.length === 0 ? (
+        <div className="mt-5 rounded-2xl border border-amber-400/20 bg-amber-400/[0.08] p-4">
+          <p className="text-sm font-semibold text-amber-100">
+            No employee appears free at this time.
+          </p>
+          <p className="mt-1 text-xs leading-5 text-amber-100/55">
+            Review the Meetings calendar before assigning this meeting.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="mt-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-white/38">
+              Employees who appear free
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {availableEmployees.map((employee) => {
+                const selected = employee.id === selectedEmployeeId;
+
+                return (
+                  <button
+                    key={employee.id}
+                    type="button"
+                    onClick={() => setSelectedEmployeeId(employee.id)}
+                    className={`rounded-2xl border p-4 text-left transition ${
+                      selected
+                        ? "border-white bg-white text-black"
+                        : "border-white/10 bg-black/20 text-white hover:bg-white/[0.07]"
+                    }`}
+                  >
+                    <p className="text-sm font-semibold">{employee.name}</p>
+                    <p
+                      className={`mt-1 text-xs ${
+                        selected ? "text-black/50" : "text-white/35"
+                      }`}
+                    >
+                      Available at the requested time
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={working || !selectedEmployee}
+            onClick={() => {
+              if (selectedEmployee) {
+                void onSend(meeting, selectedEmployee);
+              }
+            }}
+            className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-black transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {working ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Send size={16} />
+            )}
+            {selectedEmployee
+              ? `Ask ${selectedEmployee.name} to confirm availability`
+              : "Select an employee"}
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 
