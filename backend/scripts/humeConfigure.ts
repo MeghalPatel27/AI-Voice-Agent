@@ -2,7 +2,6 @@ import "dotenv/config";
 import { getHumeConfig } from "../src/integrations/hume/hume.config";
 import {
   REQUIRED_HUME_TOOLS,
-  TOOLS_TO_SCHEMA_CORRECT,
   TOOL_DESCRIPTIONS,
   buildCanonicalHumeParameters,
   buildCanonicalHumeParametersString,
@@ -181,9 +180,7 @@ async function main() {
 
     const before = parseRemoteToolParameters(attached);
     const after = buildCanonicalHumeParameters(toolName);
-    const needsUpdate =
-      TOOLS_TO_SCHEMA_CORRECT.includes(toolName as (typeof TOOLS_TO_SCHEMA_CORRECT)[number]) &&
-      !schemasEquivalent(toolName, attached);
+    const needsUpdate = !schemasEquivalent(toolName, attached);
 
     diffs.push({
       name: toolName,

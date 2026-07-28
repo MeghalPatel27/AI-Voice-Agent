@@ -7,7 +7,10 @@ export const REQUIRED_HUME_TOOLS = [
   "airadesk_request_human_handoff",
 ] as const;
 
+/** Tools whose remote schemas should be rewritten to the Hume-UI-safe canonical form. */
 export const TOOLS_TO_SCHEMA_CORRECT = [
+  "airadesk_get_call_context",
+  "airadesk_capture_lead_details",
   "airadesk_schedule_meeting",
   "airadesk_request_human_handoff",
 ] as const;
@@ -67,28 +70,30 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
 type JsonSchemaProperty = {
   type: string | string[];
   description?: string;
-  minLength?: number;
   items?: { type: string };
 };
 
+/**
+ * Hume Platform UI expects the same subset shown in their docs:
+ * type/properties/required/description/enum only.
+ * Keywords like additionalProperties and minLength parse as JSON but the
+ * website editor reports "Invalid JSON".
+ */
 type JsonSchema = {
   type: "object";
   properties: Record<string, JsonSchemaProperty>;
   required: string[];
-  additionalProperties: false;
 };
 
 function buildScheduleMeetingParameters(): JsonSchema {
   return {
     type: "object",
-    additionalProperties: false,
     required: ["preferredTimeText"],
     properties: {
       preferredTimeText: {
         type: "string",
-        minLength: 1,
         description:
-          "The date and time the caller stated, in their own words (for example 'next Tuesday at 3pm' or 'tomorrow morning'). Pass their wording verbatim. Do not invent or assume a specific calendar date or time when the request is ambiguous; ask the caller to clarify first.",
+          "The date and time the caller stated, in their own words (for example next Tuesday at 3pm or tomorrow morning). Pass their wording verbatim. Do not invent or assume a specific calendar date or time when the request is ambiguous; ask the caller to clarify first.",
       },
       timezone: {
         type: "string",
@@ -109,19 +114,16 @@ function buildScheduleMeetingParameters(): JsonSchema {
 function buildHandoffParameters(): JsonSchema {
   return {
     type: "object",
-    additionalProperties: false,
     required: ["reason", "urgency"],
     properties: {
       reason: {
         type: "string",
-        minLength: 1,
         description: "Why the caller needs a human agent.",
       },
       urgency: {
         type: "string",
-        minLength: 1,
         description:
-          "How urgent the handoff is, in the caller's own words (for example 'need someone today' or 'whenever available'). Capture what the caller said; there is no fixed enum.",
+          "How urgent the handoff is, in the callers own words (for example need someone today or whenever available). Capture what the caller said; there is no fixed enum.",
       },
       notes: {
         type: "string",
@@ -134,7 +136,6 @@ function buildHandoffParameters(): JsonSchema {
 function buildGetCallContextParameters(): JsonSchema {
   return {
     type: "object",
-    additionalProperties: false,
     required: [],
     properties: {},
   };
@@ -143,10 +144,9 @@ function buildGetCallContextParameters(): JsonSchema {
 function buildCaptureLeadParameters(): JsonSchema {
   return {
     type: "object",
-    additionalProperties: false,
     required: [],
     properties: {
-      fullName: { type: "string", description: "Caller's full name if provided." },
+      fullName: { type: "string", description: "Caller full name if provided." },
       businessType: { type: "string", description: "Type of business if mentioned." },
       requiredServices: {
         type: "array",
@@ -182,7 +182,9 @@ export function buildCanonicalHumeParameters(toolName: string): JsonSchema {
 }
 
 export function buildCanonicalHumeParametersString(toolName: string): string {
-  return JSON.stringify(buildCanonicalHumeParameters(toolName));
+  // Pretty-print matches schemas created in the Hume Platform UI and avoids
+  // the website editor treating compact API payloads as invalid.
+  return JSON.stringify(buildCanonicalHumeParameters(toolName), null, 2);
 }
 
 export function parseRemoteToolParameters(tool: unknown) {
@@ -294,13 +296,6 @@ export function validateRemoteToolSchema(tool: { name?: string }): string[] {
     if (!propertyTypeMatches(toolName, key, remoteProperty)) {
       issues.push(`type_mismatch:${toolName}.${key}`);
     }
-  }
-
-  if (
-    TOOLS_TO_SCHEMA_CORRECT.includes(toolName as (typeof TOOLS_TO_SCHEMA_CORRECT)[number]) &&
-    parsed?.additionalProperties !== false
-  ) {
-    issues.push(`additional_properties_not_false:${toolName}`);
   }
 
   return issues;

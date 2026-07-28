@@ -41,7 +41,6 @@ No required params. Must not accept tenant/database identifiers.
 ```json
 {
   "type": "object",
-  "additionalProperties": false,
   "required": [],
   "properties": {}
 }
@@ -55,7 +54,7 @@ All fields optional:
 ### `airadesk_schedule_meeting`
 Required:
 
-- `preferredTimeText` (string, minLength 1): caller's stated date/time wording, verbatim. Do not invent an exact calendar date/time when ambiguous; ask for clarification.
+- `preferredTimeText` (string): caller's stated date/time wording, verbatim. Do not invent an exact calendar date/time when ambiguous; ask for clarification.
 
 Optional:
 
@@ -66,13 +65,11 @@ Must not accept: `companyId`, `tenantId`, `callId`, `customerId`, `assignedUserI
 ```json
 {
   "type": "object",
-  "additionalProperties": false,
   "required": ["preferredTimeText"],
   "properties": {
     "preferredTimeText": {
       "type": "string",
-      "minLength": 1,
-      "description": "The date and time the caller stated, in their own words (for example 'next Tuesday at 3pm' or 'tomorrow morning'). Pass their wording verbatim. Do not invent or assume a specific calendar date or time when the request is ambiguous; ask the caller to clarify first."
+      "description": "The date and time the caller stated, in their own words (for example next Tuesday at 3pm or tomorrow morning). Pass their wording verbatim. Do not invent or assume a specific calendar date or time when the request is ambiguous; ask the caller to clarify first."
     },
     "timezone": {
       "type": "string",
@@ -95,8 +92,8 @@ Ambiguous times: backend parses `preferredTimeText` with `new Date(...)`. If par
 ### `airadesk_request_human_handoff`
 Required:
 
-- `reason` (string, minLength 1)
-- `urgency` (string, minLength 1): free-form caller wording, **not** a fixed enum
+- `reason` (string)
+- `urgency` (string): free-form caller wording, **not** a fixed enum
 
 Optional:
 
@@ -107,18 +104,15 @@ Must not accept: `companyId`, `tenantId`, `callId`, `customerId`, `userId`, assi
 ```json
 {
   "type": "object",
-  "additionalProperties": false,
   "required": ["reason", "urgency"],
   "properties": {
     "reason": {
       "type": "string",
-      "minLength": 1,
       "description": "Why the caller needs a human agent."
     },
     "urgency": {
       "type": "string",
-      "minLength": 1,
-      "description": "How urgent the handoff is, in the caller's own words (for example 'need someone today' or 'whenever available'). Capture what the caller said; there is no fixed enum."
+      "description": "How urgent the handoff is, in the callers own words (for example need someone today or whenever available). Capture what the caller said; there is no fixed enum."
     },
     "notes": {
       "type": "string",
@@ -128,6 +122,7 @@ Must not accept: `companyId`, `tenantId`, `callId`, `customerId`, `userId`, assi
 }
 ```
 
+Hume Platform tip: keep parameter schemas to the documented subset (`type`, `properties`, `required`, `description`, `enum`, `items`). Extra keywords such as `additionalProperties` or `minLength` can make the website editor show **Invalid JSON** even though the API accepts them.
 ## Configure and Validate Scripts
 
 ```bash

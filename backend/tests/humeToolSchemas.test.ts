@@ -37,6 +37,16 @@ describe("Hume tool schema contracts", () => {
     expect(schema.properties.urgency?.type).toBe("string");
     expect("enum" in (schema.properties.urgency || {})).toBe(false);
   });
+
+  it("uses Hume-UI-safe schemas without additionalProperties or minLength", () => {
+    for (const name of ["airadesk_schedule_meeting", "airadesk_request_human_handoff"] as const) {
+      const schema = buildCanonicalHumeParameters(name);
+      expect("additionalProperties" in schema).toBe(false);
+      for (const property of Object.values(schema.properties)) {
+        expect("minLength" in property).toBe(false);
+      }
+    }
+  });
 });
 
 describe("validateRemoteToolSchema", () => {
@@ -46,7 +56,6 @@ describe("validateRemoteToolSchema", () => {
         type: "object",
         properties: { purpose: { type: "string" } },
         required: [],
-        additionalProperties: false,
       }),
     );
     expect(issues).toContain("missing_param:airadesk_schedule_meeting.preferredTimeText");
@@ -57,9 +66,8 @@ describe("validateRemoteToolSchema", () => {
     const issues = validateRemoteToolSchema(
       remoteTool("airadesk_request_human_handoff", {
         type: "object",
-        properties: { urgency: { type: "string", minLength: 1 } },
+        properties: { urgency: { type: "string" } },
         required: ["urgency"],
-        additionalProperties: false,
       }),
     );
     expect(issues).toContain("missing_param:airadesk_request_human_handoff.reason");
@@ -70,9 +78,8 @@ describe("validateRemoteToolSchema", () => {
     const issues = validateRemoteToolSchema(
       remoteTool("airadesk_request_human_handoff", {
         type: "object",
-        properties: { reason: { type: "string", minLength: 1 } },
+        properties: { reason: { type: "string" } },
         required: ["reason"],
-        additionalProperties: false,
       }),
     );
     expect(issues).toContain("missing_param:airadesk_request_human_handoff.urgency");
@@ -84,11 +91,10 @@ describe("validateRemoteToolSchema", () => {
       remoteTool("airadesk_request_human_handoff", {
         type: "object",
         properties: {
-          reason: { type: "string", minLength: 1 },
+          reason: { type: "string" },
           urgency: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
         },
         required: ["reason", "urgency"],
-        additionalProperties: false,
       }),
     );
     expect(issues).not.toContain("missing_param:airadesk_request_human_handoff.urgency");
@@ -102,11 +108,10 @@ describe("validateRemoteToolSchema", () => {
         remoteTool("airadesk_schedule_meeting", {
           type: "object",
           properties: {
-            preferredTimeText: { type: "string", minLength: 1 },
+            preferredTimeText: { type: "string" },
             [forbidden]: { type: "string" },
           },
           required: ["preferredTimeText"],
-          additionalProperties: false,
         }),
       );
       expect(issues).toContain(`forbidden_param:airadesk_schedule_meeting.${forbidden}`);
@@ -115,17 +120,13 @@ describe("validateRemoteToolSchema", () => {
 
   it("accepts the final canonical schedule-meeting schema", () => {
     const canonical = buildCanonicalHumeParameters("airadesk_schedule_meeting");
-    const issues = validateRemoteToolSchema(
-      remoteTool("airadesk_schedule_meeting", canonical),
-    );
+    const issues = validateRemoteToolSchema(remoteTool("airadesk_schedule_meeting", canonical));
     expect(issues).toEqual([]);
   });
 
   it("accepts the final canonical handoff schema", () => {
     const canonical = buildCanonicalHumeParameters("airadesk_request_human_handoff");
-    const issues = validateRemoteToolSchema(
-      remoteTool("airadesk_request_human_handoff", canonical),
-    );
+    const issues = validateRemoteToolSchema(remoteTool("airadesk_request_human_handoff", canonical));
     expect(issues).toEqual([]);
   });
 });
