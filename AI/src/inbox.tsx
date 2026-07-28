@@ -11,6 +11,9 @@ import {
   AlertTriangle,
   Bot,
   CalendarCheck,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Headphones,
   Inbox,
@@ -25,12 +28,10 @@ import {
   Sparkles,
   UserRound,
   UsersRound,
+  X,
 } from "lucide-react";
 import { API_BASE_URL, apiFetch } from "./lib/api";
 import {
-  analysisStatusLabel,
-  intentLevelLabel,
-  intentTone,
   isLiveCallStatus,
   type PostCallAnalysisView,
 } from "./lib/postCallAnalysis";
@@ -144,6 +145,14 @@ type Call = {
   } | null;
 };
 
+type TeamUser = {
+  id: string;
+  name: string;
+  email?: string | null;
+  role?: string;
+  isActive?: boolean;
+};
+
 type Task = {
   id: string;
   title: string;
@@ -155,12 +164,7 @@ type Task = {
   priority: string;
   status: string;
   delayed?: boolean;
-  assignedUser?: {
-    id: string;
-    name: string;
-    email: string;
-    role: string;
-  } | null;
+  assignedUser?: TeamUser | null;
   scheduledCall?: {
     taskId?: string;
     status?: string | null;
@@ -196,7 +200,27 @@ type Booking = {
   title: string;
   dateTime?: string | null;
   status: string;
+  assignedUserId?: string | null;
+  assignedUser?: TeamUser | null;
+  owner?: string | null;
+  acceptanceStatus?: string | null;
+  acceptedAt?: string | null;
+  acceptedByUserId?: string | null;
   createdAt: string;
+};
+
+type BookingsResponse = {
+  bookings: Booking[];
+};
+
+type BookingResponse = {
+  message?: string;
+  booking?: Booking;
+};
+
+type TeamResponse = {
+  teamMembers?: TeamUser[];
+  members?: Array<TeamUser & { type?: string }>;
 };
 
 type TimelineItem = {
@@ -320,6 +344,363 @@ const channels: {
   { label: "Website", value: "WEBSITE_CHAT" },
   { label: "Email", value: "EMAIL" },
 ];
+
+const QUEUE_PAGE_SIZE = 10;
+
+type IntentPresentation = {
+  label: string;
+  priority: string;
+  tone: "normal" | "warning" | "danger" | "success" | "muted";
+  emptyMessage?: string;
+};
+
+function resolveIntentPresentation(
+  analysis: PostCallAnalysisView | null | undefined,
+  fallbackIntent?: string | null,
+): IntentPresentation {
+  const status = String(analysis?.analysisStatus || "NONE").toUpperCase();
+  const rawIntent = String(analysis?.intentLevel || fallbackIntent || "").trim();
+  const normalized = rawIntent.toUpperCase().replace(/[\s-]+/g, "_");
+
+  if (status === "PENDING" || status === "PROCESSING") {
+    return {
+      label: "",
+      priority: "",
+      tone: "warning",
+      emptyMessage: "Customer intent is still being analysed.",
+    };
+  }
+
+  if (status === "FAILED") {
+    return {
+      label: "",
+      priority: "",
+      tone: "muted",
+      emptyMessage: "Customer intent could not be determined.",
+    };
+  }
+
+  if (
+    status === "INSUFFICIENT_DATA" ||
+    !normalized ||
+    ["NONE", "UNKNOWN", "NOT_DETECTED", "UNDETERMINED"].includes(normalized)
+  ) {
+    return {
+      label: "",
+      priority: "",
+      tone: "muted",
+      emptyMessage: "No clear customer intent was detected.",
+    };
+  }
+
+  if (
+    /NOT_INTERESTED|NO_INTENT|REJECTED|DECLINED|LOST|DO_NOT_CONTACT/.test(
+      normalized,
+    )
+  ) {
+    return {
+      label: "Not interested",
+      priority: "Do not prioritise this lead.",
+      tone: "danger",
+    };
+  }
+
+  if (/HIGH|HOT|STRONG|READY|PURCHASE_READY|BUYING/.test(normalized)) {
+    return {
+      label: "High intent",
+      priority: "Worth immediate attention.",
+      tone: "success",
+    };
+  }
+
+  if (/MEDIUM|WARM|MODERATE|CONSIDERING|INTERESTED/.test(normalized)) {
+    return {
+      label: "Medium intent",
+      priority: "Worth a focused follow-up.",
+      tone: "warning",
+    };
+  }
+
+  if (/LOW|COLD|WEAK|BROWSING|CASUAL/.test(normalized)) {
+    return {
+      label: "Low intent",
+      priority: "Low priority unless the customer re-engages.",
+      tone: "muted",
+    };
+  }
+
+  if (
+    rawIntent.length > 48 ||
+    /\b(?:need|needs|want|wants|require|requires|requirement|requirements|purpose)\b/i.test(
+      rawIntent,
+    )
+  ) {
+    return {
+      label: "",
+      priority: "",
+      tone: "muted",
+      emptyMessage: "No clear customer intent was detected.",
+    };
+  }
+
+  return {
+    label: formatEnum(rawIntent),
+    priority: "",
+    tone: "normal",
+  };
+}
+
+function extractPurposeFromJson(value: string): string {
+  const trimmed = value.trim();
+
+  if (
+    !(
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    )
+  ) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+
+    function visit(item: unknown): string {
+      if (!item) return "";
+      if (typeof item === "string") return item;
+      if (Array.isArray(item)) {
+        for (const child of item) {
+          const result = visit(child);
+          if (result) return result;
+        }
+        return "";
+      }
+
+      if (typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        const preferredKeys = [
+          "primaryNeed",
+          "customerNeed",
+          "purpose",
+          "requirementSummary",
+          "requirement",
+          "need",
+        ];
+
+        for (const key of preferredKeys) {
+          if (typeof record[key] === "string" && String(record[key]).trim()) {
+            return String(record[key]).trim();
+          }
+        }
+
+        for (const child of Object.values(record)) {
+          const result = visit(child);
+          if (result) return result;
+        }
+      }
+
+      return "";
+    }
+
+    return visit(parsed);
+  } catch {
+    return "";
+  }
+}
+
+function cleanCustomerNeed(value?: string | null) {
+  let candidate = String(value || "").trim();
+  if (!candidate) return "";
+
+  const jsonPurpose = extractPurposeFromJson(candidate);
+  if (jsonPurpose) candidate = jsonPurpose;
+
+  const labelledPurpose = candidate.match(
+    /\b(?:purpose|primary need|customer need|what the customer needs|requirement)\s*[:\-]\s*([\s\S]*?)(?=(?:\n|[;|•·,])\s*(?:phone(?: number)?|number|status|language|scheduled(?: at| for)?|started|completed|call sid|provider|task id|notes?)\s*[:\-]|$)/i,
+  );
+
+  if (labelledPurpose?.[1]) {
+    candidate = labelledPurpose[1].trim();
+  }
+
+  const noiseLine = /^(?:phone(?: number)?|number|status|language|scheduled(?: at| for)?|started|completed|call sid|provider|task id|notes?)\s*[:\-]/i;
+
+  candidate = candidate
+    .split(/\r?\n|[|•]+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !noiseLine.test(line))
+    .join(" ")
+    .replace(/^(?:purpose|primary need|customer need|requirement)\s*[:\-]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!candidate) return "";
+
+  const operationalNoise = [
+    /^customer completed (?:an )?ai (?:voice )?call/i,
+    /^(?:outbound\s+)?ai (?:voice )?call (?:was )?(?:requested|completed|scheduled)/i,
+    /^call (?:was )?(?:requested|completed|scheduled)/i,
+    /^call this (?:lead|customer)/i,
+    /^incoming call started/i,
+  ];
+
+  if (operationalNoise.some((pattern) => pattern.test(candidate))) {
+    return "";
+  }
+
+  if (
+    /collect (?:the )?.*requirements/i.test(candidate) &&
+    /schedule (?:a )?meeting/i.test(candidate)
+  ) {
+    return "";
+  }
+
+  if (/^\+?\d[\d\s()-]{7,}$/.test(candidate)) {
+    return "";
+  }
+
+  return candidate;
+}
+
+function cleanRecommendedNextStep(value?: string | null) {
+  const candidate = String(value || "").replace(/\s+/g, " ").trim();
+  if (!candidate) return "";
+
+  if (
+    /^(?:none|no action|not available|unknown|customer completed an ai voice call)$/i.test(
+      candidate,
+    )
+  ) {
+    return "";
+  }
+
+  return candidate;
+}
+
+function normalizeComparableText(value?: string | null) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, "");
+}
+
+function uniqueTextItems(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+
+  return values
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      const key = normalizeComparableText(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function startOfLocalDay(value: Date) {
+  const result = new Date(value);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function endOfLocalDay(value: Date) {
+  const result = new Date(value);
+  result.setHours(23, 59, 59, 999);
+  return result;
+}
+
+function isSameLocalDay(value: string | null | undefined, target: Date) {
+  if (!value) return false;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+
+  return (
+    date.getFullYear() === target.getFullYear() &&
+    date.getMonth() === target.getMonth() &&
+    date.getDate() === target.getDate()
+  );
+}
+
+function compareBookingDate(a: Booking, b: Booking) {
+  const aTime = a.dateTime ? new Date(a.dateTime).getTime() : Number.MAX_SAFE_INTEGER;
+  const bTime = b.dateTime ? new Date(b.dateTime).getTime() : Number.MAX_SAFE_INTEGER;
+  return aTime - bTime;
+}
+
+function bookingTone(
+  status?: string | null,
+): "normal" | "warning" | "danger" | "success" | "muted" {
+  const value = String(status || "").toUpperCase();
+
+  if (["COMPLETED", "CONFIRMED", "ACCEPTED", "WON"].includes(value)) {
+    return "success";
+  }
+
+  if (["REQUESTED", "PENDING_ACCEPTANCE", "FOLLOW_UP"].includes(value)) {
+    return "warning";
+  }
+
+  if (["CANCELLED", "NO_SHOW", "LOST"].includes(value)) {
+    return "danger";
+  }
+
+  return "muted";
+}
+
+function bookingDisplayStatus(status?: string | null) {
+  const value = String(status || "").toUpperCase();
+
+  if (value === "REQUESTED") return "Pending acceptance";
+  if (value === "CONFIRMED") return "Upcoming";
+  return formatEnum(value || "NOT_SCHEDULED");
+}
+
+const DEFAULT_MEETING_DURATION_MINUTES = 60;
+
+function isMeetingOpenForAssignment(booking: Booking) {
+  const status = String(booking.status || "").toUpperCase();
+  return !["CANCELLED", "COMPLETED", "NO_SHOW"].includes(status);
+}
+
+function employeeHasMeetingConflict(
+  employeeId: string,
+  targetBooking: Booking,
+  allBookings: Booking[],
+) {
+  if (!targetBooking.dateTime) return false;
+
+  const targetStart = new Date(targetBooking.dateTime).getTime();
+  if (Number.isNaN(targetStart)) return false;
+
+  const targetEnd =
+    targetStart + DEFAULT_MEETING_DURATION_MINUTES * 60 * 1000;
+
+  return allBookings.some((booking) => {
+    if (
+      booking.id === targetBooking.id ||
+      booking.assignedUserId !== employeeId ||
+      !booking.dateTime ||
+      !isMeetingOpenForAssignment(booking)
+    ) {
+      return false;
+    }
+
+    const bookingStart = new Date(booking.dateTime).getTime();
+    if (Number.isNaN(bookingStart)) return false;
+
+    const bookingEnd =
+      bookingStart + DEFAULT_MEETING_DURATION_MINUTES * 60 * 1000;
+
+    return targetStart < bookingEnd && bookingStart < targetEnd;
+  });
+}
+
+function countWords(value: string) {
+  return value.trim() ? value.trim().split(/\s+/).length : 0;
+}
 
 function formatEnum(value?: string | null) {
   if (!value) return "-";
@@ -471,6 +852,7 @@ export default function InboxPage() {
   const [filter, setFilter] = useState<InboxFilter>("ALL");
   const [channel, setChannel] = useState<ChannelFilter>("ALL");
   const [search, setSearch] = useState("");
+  const [queuePage, setQueuePage] = useState(1);
 
   const [summary, setSummary] = useState<InboxResponse["summary"]>({
     total: 0,
@@ -498,6 +880,10 @@ export default function InboxPage() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+
+  const [teamMembers, setTeamMembers] = useState<TeamUser[]>([]);
+  const [allBookings, setAllBookings] = useState<Booking[]>([]);
+  const [assignmentWorking, setAssignmentWorking] = useState(false);
 
   const [showWhatsAppStart, setShowWhatsAppStart] = useState(false);
   const [whatsAppName, setWhatsAppName] = useState("");
@@ -537,12 +923,24 @@ export default function InboxPage() {
       );
       setConversations(data.conversations);
 
+      const preferredId = nextSelectedId || selectedIdRef.current;
       const nextId =
-        nextSelectedId ||
-        selectedIdRef.current ||
+        (preferredId &&
+        data.conversations.some((conversation) => conversation.id === preferredId)
+          ? preferredId
+          : "") ||
         data.conversations[0]?.id ||
         "";
 
+      const selectedIndex = data.conversations.findIndex(
+        (conversation) => conversation.id === nextId,
+      );
+
+      setQueuePage(
+        selectedIndex >= 0
+          ? Math.floor(selectedIndex / QUEUE_PAGE_SIZE) + 1
+          : 1,
+      );
       setSelectedId(nextId);
 
       if (nextId) {
@@ -576,15 +974,39 @@ export default function InboxPage() {
     }
   }
 
+  async function loadMeetingAssignmentData() {
+    const [teamResult, bookingsResult] = await Promise.allSettled([
+      apiFetch<TeamResponse>("/api/team/overview"),
+      apiFetch<BookingsResponse>("/api/bookings"),
+    ]);
+
+    if (teamResult.status === "fulfilled") {
+      const data = teamResult.value;
+      const members =
+        data.teamMembers ||
+        (data.members || []).filter((member) => member.type !== "UNASSIGNED");
+
+      setTeamMembers(
+        members.filter((member) => member.isActive !== false),
+      );
+    }
+
+    if (bookingsResult.status === "fulfilled") {
+      setAllBookings(bookingsResult.value.bookings || []);
+    }
+  }
+
   async function openConversation(id: string) {
     await loadConversation(id);
 
-    window.setTimeout(() => {
-      document.getElementById("conversation-workspace")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    }, 80);
+    if (window.innerWidth < 1280) {
+      window.setTimeout(() => {
+        document.getElementById("selected-conversation-panel")?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 80);
+    }
   }
 
   async function refreshCurrentConversation() {
@@ -755,6 +1177,48 @@ export default function InboxPage() {
     }
   }
 
+  async function sendEmployeeAvailabilityRequest(
+    booking: Booking,
+    employee: TeamUser,
+  ) {
+    try {
+      setAssignmentWorking(true);
+      setError("");
+      setNotice("");
+
+      const data = await apiFetch<BookingResponse>(
+        `/api/bookings/${booking.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            assignedUserId: employee.id,
+          }),
+        },
+      );
+
+      setNotice(
+        `Availability request sent to ${employee.name}. The meeting is now pending their acceptance.`,
+      );
+
+      await Promise.all([
+        refreshCurrentConversation(),
+        loadMeetingAssignmentData(),
+      ]);
+
+      if (data.booking?.id && selectedId) {
+        await loadConversation(selectedId);
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to send the employee availability request",
+      );
+    } finally {
+      setAssignmentWorking(false);
+    }
+  }
+
   async function createBooking() {
     if (!selectedConversation) return;
 
@@ -798,6 +1262,10 @@ export default function InboxPage() {
     return () => window.clearTimeout(timeout);
   }, [loadInbox]);
 
+  useEffect(() => {
+    void loadMeetingAssignmentData();
+  }, []);
+
   const latestCallStatus = selectedConversation?.latestCall?.status;
   const firstCallStatus = selectedConversation?.calls?.[0]?.status;
   const latestAnalysisStatus =
@@ -834,6 +1302,29 @@ export default function InboxPage() {
   const selectedCall = useMemo(() => {
     return selectedConversation?.latestCall || selectedConversation?.calls?.[0] || null;
   }, [selectedConversation]);
+
+  const queuePageCount = Math.max(
+    1,
+    Math.ceil(conversations.length / QUEUE_PAGE_SIZE),
+  );
+  const safeQueuePage = Math.min(queuePage, queuePageCount);
+  const queueStart = (safeQueuePage - 1) * QUEUE_PAGE_SIZE;
+  const visibleConversations = conversations.slice(
+    queueStart,
+    queueStart + QUEUE_PAGE_SIZE,
+  );
+
+  function goToQueuePage(nextPage: number) {
+    const clampedPage = Math.min(Math.max(nextPage, 1), queuePageCount);
+    setQueuePage(clampedPage);
+
+    const firstConversation =
+      conversations[(clampedPage - 1) * QUEUE_PAGE_SIZE];
+
+    if (firstConversation && firstConversation.id !== selectedId) {
+      void loadConversation(firstConversation.id);
+    }
+  }
 
   return (
     <section className="space-y-5 pb-8">
@@ -875,14 +1366,16 @@ export default function InboxPage() {
             </h1>
 
             <p className="mt-3 max-w-3xl text-sm leading-6 text-white/45">
-              All customer conversations, calls, handoffs, follow-ups and next
-              actions in one clean workspace.
+              Search, select and work on a customer without scrolling through a
+              long wall of conversation cards.
             </p>
           </div>
 
           <div className="flex flex-wrap gap-2">
             <button
+              type="button"
               onClick={() => {
+                setQueuePage(1);
                 setChannel("WHATSAPP");
                 setShowWhatsAppStart((value) => !value);
               }}
@@ -893,6 +1386,7 @@ export default function InboxPage() {
             </button>
 
             <button
+              type="button"
               onClick={() => loadInbox()}
               className="flex h-12 items-center justify-center gap-2 rounded-2xl border border-white/10 bg-black/25 px-5 text-sm text-white/70 transition hover:bg-white/[0.07] hover:text-white"
             >
@@ -970,8 +1464,12 @@ export default function InboxPage() {
           <div className="inbox-scroll flex gap-2 overflow-x-auto pb-1">
             {filters.map((item) => (
               <button
+                type="button"
                 key={item.value}
-                onClick={() => setFilter(item.value)}
+                onClick={() => {
+                  setQueuePage(1);
+                  setFilter(item.value);
+                }}
                 className={`shrink-0 rounded-full border px-4 py-2 text-sm transition ${
                   filter === item.value
                     ? "border-white bg-white text-black"
@@ -990,9 +1488,13 @@ export default function InboxPage() {
 
                 return (
                   <button
+                    type="button"
                     key={item.value}
                     disabled={disabled}
-                    onClick={() => setChannel(item.value)}
+                    onClick={() => {
+                      setQueuePage(1);
+                      setChannel(item.value);
+                    }}
                     className={`shrink-0 rounded-full border px-3 py-2 text-xs transition ${
                       channel === item.value
                         ? "border-white bg-white text-black"
@@ -1012,8 +1514,11 @@ export default function InboxPage() {
               <Search size={17} className="shrink-0 text-white/30" />
               <input
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search customer, phone, summary..."
+                onChange={(event) => {
+                  setQueuePage(1);
+                  setSearch(event.target.value);
+                }}
+                placeholder="Search customer or phone..."
                 className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-white/25"
               />
             </div>
@@ -1033,129 +1538,172 @@ export default function InboxPage() {
         ) : null}
       </section>
 
-      <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-5 md:p-6">
-        <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-[-0.04em]">
-              {channel === "WHATSAPP" ? "WhatsApp Chats" : "Conversation Queue"}
-            </h2>
-            <p className="mt-2 text-sm text-white/40">
-              {channel === "WHATSAPP"
-                ? "Manage WhatsApp leads, replies, tasks and meeting requests inside the CRM."
-                : "Pick a customer first. The full chat and call workspace opens below with more space."}
-            </p>
+      <section className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)] xl:items-start">
+        <aside className="overflow-hidden rounded-[34px] border border-white/10 bg-white/[0.04] xl:sticky xl:top-5">
+          <div className="border-b border-white/10 p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-2xl font-semibold tracking-[-0.04em]">
+                  {channel === "WHATSAPP" ? "WhatsApp Customers" : "Customer Queue"}
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-white/40">
+                  Ten customers per page. Search above to jump directly to anyone.
+                </p>
+              </div>
+
+              <Badge tone="normal">{conversations.length}</Badge>
+            </div>
+
+            {conversations.length > 0 ? (
+              <p className="mt-4 text-xs text-white/35">
+                Showing {queueStart + 1}–
+                {Math.min(queueStart + QUEUE_PAGE_SIZE, conversations.length)} of{" "}
+                {conversations.length}
+              </p>
+            ) : null}
           </div>
 
-          <p className="text-sm text-white/35">
-            Showing {conversations.length} conversation
-            {conversations.length === 1 ? "" : "s"}
-          </p>
-        </div>
-
-        <div className="mt-5">
-          {loadingList ? (
-            <LoadingState text="Loading conversations..." />
-          ) : conversations.length === 0 ? (
-            <EmptyState
-              icon={<Inbox size={28} />}
-              title="No conversations found"
-              description={
-                channel === "WHATSAPP"
-                  ? "No WhatsApp chats yet. Click New WhatsApp Chat to start a CRM chat."
-                  : "New customer conversations will appear here based on your selected filters."
-              }
-            />
-          ) : (
-            <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-              {conversations.map((conversation) => (
-                <ConversationCard
-                  key={conversation.id}
-                  conversation={conversation}
-                  active={selectedId === conversation.id}
-                  onClick={() => openConversation(conversation.id)}
+          <div className="inbox-scroll max-h-[calc(100vh-280px)] min-h-[420px] overflow-y-auto p-3">
+            {loadingList ? (
+              <div className="p-3">
+                <LoadingState text="Loading customers..." />
+              </div>
+            ) : conversations.length === 0 ? (
+              <div className="p-3">
+                <EmptyState
+                  icon={<Inbox size={28} />}
+                  title="No customers found"
+                  description={
+                    channel === "WHATSAPP"
+                      ? "No WhatsApp chats match the current filters."
+                      : "No customer conversations match the current filters."
+                  }
                 />
-              ))}
-            </div>
-          )}
-        </div>
-      </section>
-
-      {loadingDetail ? (
-        <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-8">
-          <LoadingState text="Opening conversation..." />
-        </section>
-      ) : selectedConversation ? (
-        <>
-          <SelectedConversationOverview
-            conversation={selectedConversation}
-            onTakeOver={() => runAction("TAKE_OVER")}
-            onReturnToAi={() => runAction("RETURN_TO_AI")}
-            onFollowUp={() => runAction("FOLLOW_UP")}
-            onWon={() => runAction("MARK_WON")}
-            onLost={() => runAction("MARK_LOST")}
-            onDelete={deleteSelectedConversation}
-            disabled={sending}
-          />
-
-          <section className="grid gap-5 xl:grid-cols-2">
-            <AiSummarySection conversation={selectedConversation} />
-            <CustomerAndActionSection conversation={selectedConversation} />
-          </section>
-
-          <section className="grid gap-5 xl:grid-cols-2">
-            <PostCallIntelligenceSection
-              analysis={
-                selectedCall?.postCallAnalysis ||
-                selectedConversation.latestCallAnalysis ||
-                null
-              }
-            />
-            {(selectedConversation.scheduledCall ||
-            selectedConversation.leadRequirements) ? (
-              <LeadRequirementsSection conversation={selectedConversation} />
+              </div>
             ) : (
-              <ScheduledCallSection conversation={selectedConversation} />
+              <div className="space-y-2.5">
+                {visibleConversations.map((conversation) => (
+                  <ConversationCard
+                    key={conversation.id}
+                    conversation={conversation}
+                    active={selectedId === conversation.id}
+                    onClick={() => openConversation(conversation.id)}
+                  />
+                ))}
+              </div>
             )}
-          </section>
+          </div>
 
-          {selectedConversation.scheduledCall &&
-          selectedConversation.leadRequirements ? (
-            <section className="grid gap-5 xl:grid-cols-2">
-              <ScheduledCallSection conversation={selectedConversation} />
-            </section>
+          {conversations.length > 0 ? (
+            <div className="flex items-center justify-between gap-3 border-t border-white/10 bg-black/20 p-4">
+              <button
+                type="button"
+                onClick={() => goToQueuePage(safeQueuePage - 1)}
+                disabled={safeQueuePage <= 1}
+                className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-sm text-white/60 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <ChevronLeft size={16} />
+                Previous
+              </button>
+
+              <span className="text-xs text-white/40">
+                Page {safeQueuePage} of {queuePageCount}
+              </span>
+
+              <button
+                type="button"
+                onClick={() => goToQueuePage(safeQueuePage + 1)}
+                disabled={safeQueuePage >= queuePageCount}
+                className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-sm text-white/60 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                Next
+                <ChevronRight size={16} />
+              </button>
+            </div>
           ) : null}
+        </aside>
 
-          <section className="grid gap-5 xl:grid-cols-2">
-            <TaskBookingSection conversation={selectedConversation} />
-            <TimelineSection conversation={selectedConversation} />
-          </section>
+        <main
+          id="selected-conversation-panel"
+          className="min-w-0 space-y-5 scroll-mt-5"
+        >
+          {loadingDetail ? (
+            <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-8">
+              <LoadingState text="Opening customer..." />
+            </section>
+          ) : selectedConversation ? (
+            <>
+              <SelectedConversationOverview
+                conversation={selectedConversation}
+                onTakeOver={() => runAction("TAKE_OVER")}
+                onReturnToAi={() => runAction("RETURN_TO_AI")}
+                onFollowUp={() => runAction("FOLLOW_UP")}
+                onWon={() => runAction("MARK_WON")}
+                onLost={() => runAction("MARK_LOST")}
+                onDelete={deleteSelectedConversation}
+                disabled={sending}
+              />
 
-          <ConversationWorkspace
-            conversation={selectedConversation}
-            call={selectedCall}
-            reply={reply}
-            setReply={setReply}
-            sending={sending}
-            onSendReply={sendReply}
-            onCreateTask={createTask}
-            onCreateBooking={createBooking}
-            onTakeOver={() => runAction("TAKE_OVER")}
-            onFollowUp={() => runAction("FOLLOW_UP")}
-          />
-        </>
-      ) : (
-        <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-8">
-          <EmptyState
-            icon={<MessageCircle size={30} />}
-            title="Select a conversation"
-            description="The customer details, AI summary, tasks, timeline and full chat workspace will appear below."
-          />
-        </section>
-      )}
+              <section className="grid gap-5 2xl:grid-cols-2">
+                <PostCallIntelligenceSection
+                  conversation={selectedConversation}
+                  analysis={
+                    selectedCall?.postCallAnalysis ||
+                    selectedConversation.latestCallAnalysis ||
+                    null
+                  }
+                />
+                <LeadRequirementsSection
+                  conversation={selectedConversation}
+                  analysis={
+                    selectedCall?.postCallAnalysis ||
+                    selectedConversation.latestCallAnalysis ||
+                    null
+                  }
+                />
+              </section>
+
+              {selectedConversation.scheduledCall &&
+              selectedConversation.calls.length === 0 &&
+              !selectedConversation.leadRequirements ? (
+                <ScheduledCallSection conversation={selectedConversation} />
+              ) : null}
+
+              <TaskBookingSection
+                conversation={selectedConversation}
+                teamMembers={teamMembers}
+                allBookings={allBookings}
+                assignmentWorking={assignmentWorking}
+                onSendAvailabilityRequest={sendEmployeeAvailabilityRequest}
+              />
+
+              <ConversationWorkspace
+                conversation={selectedConversation}
+                call={selectedCall}
+                reply={reply}
+                setReply={setReply}
+                sending={sending}
+                onSendReply={sendReply}
+                onCreateTask={createTask}
+                onCreateBooking={createBooking}
+                onTakeOver={() => runAction("TAKE_OVER")}
+                onFollowUp={() => runAction("FOLLOW_UP")}
+              />
+            </>
+          ) : (
+            <section className="rounded-[34px] border border-white/10 bg-white/[0.04] p-8">
+              <EmptyState
+                icon={<MessageCircle size={30} />}
+                title="Select a customer"
+                description="Intent, requirement, tasks, meetings and call details will appear here."
+              />
+            </section>
+          )}
+        </main>
+      </section>
     </section>
   );
 }
-
 
 function WhatsAppStartPanel({
   name,
@@ -1257,33 +1805,34 @@ function ConversationCard({
 
   return (
     <button
+      type="button"
       onClick={onClick}
-      className={`w-full rounded-[28px] border p-5 text-left transition ${
+      className={`w-full rounded-2xl border p-4 text-left transition ${
         active
-          ? "border-white bg-white text-black shadow-[0_24px_80px_rgba(255,255,255,0.10)]"
+          ? "border-white bg-white text-black shadow-[0_18px_50px_rgba(255,255,255,0.08)]"
           : "border-white/10 bg-black/20 text-white hover:bg-white/[0.07]"
       }`}
     >
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span
-              className={`shrink-0 ${active ? "text-black/60" : "text-white/45"}`}
+              className={`shrink-0 ${active ? "text-black/55" : "text-white/40"}`}
             >
               {getChannelIcon(conversation.channel)}
             </span>
 
-            <p className="truncate text-lg font-semibold tracking-[-0.03em]">
+            <p className="truncate text-base font-semibold tracking-[-0.02em]">
               {conversation.customerName}
             </p>
           </div>
 
           <p
-            className={`mt-1 truncate text-sm ${
+            className={`mt-1 truncate text-xs ${
               active ? "text-black/45" : "text-white/35"
             }`}
           >
-            {conversation.channelLabel} · {formatTime(conversation.lastActivityAt)}
+            {conversation.customerPhone || "No phone"}
           </p>
         </div>
 
@@ -1292,62 +1841,15 @@ function ConversationCard({
         </Badge>
       </div>
 
-      <p
-        className={`mt-4 line-clamp-3 text-sm leading-6 ${
-          active ? "text-black/65" : "text-white/48"
-        }`}
-      >
-        {conversation.summary}
-      </p>
-
-      <div className="mt-5 flex flex-wrap gap-2">
-        <Badge
-          active={active}
-          tone={
-            conversation.priority === "HIGH" ||
-            conversation.priority === "CRITICAL"
-              ? "danger"
-              : "normal"
-          }
-        >
-          {formatEnum(conversation.priority)}
-        </Badge>
-
-        <Badge
-          active={active}
-          tone={
-            conversation.ownerType === "AI"
-              ? "success"
-              : conversation.ownerType === "UNASSIGNED"
-                ? "warning"
-                : "normal"
-          }
-        >
-          Owner: {conversation.ownerLabel}
-        </Badge>
-
-        {conversation.delayed ? (
-          <Badge active={active} tone="danger">
-            Delayed
-          </Badge>
-        ) : null}
-      </div>
-
       <div
-        className={`mt-5 rounded-2xl p-4 ${
-          active ? "bg-black/10" : "bg-black/20"
+        className={`mt-3 flex items-center justify-between gap-3 border-t pt-3 text-xs ${
+          active
+            ? "border-black/10 text-black/50"
+            : "border-white/8 text-white/35"
         }`}
       >
-        <p className={`text-xs ${active ? "text-black/45" : "text-white/35"}`}>
-          Next action
-        </p>
-        <p
-          className={`mt-1 line-clamp-2 text-sm font-medium leading-6 ${
-            active ? "text-black/75" : "text-white/65"
-          }`}
-        >
-          {conversation.nextAction}
-        </p>
+        <span className="truncate">{conversation.ownerLabel}</span>
+        <span className="shrink-0">{formatTime(conversation.lastActivityAt)}</span>
       </div>
     </button>
   );
@@ -1399,15 +1901,12 @@ function SelectedConversationOverview({
             </Badge>
           </div>
 
-          <p className="mt-3 text-sm text-white/40">
-            {conversation.customerPhone || "No phone"} ·{" "}
-            {conversation.customerEmail || "No email"} · Owner:{" "}
-            {conversation.ownerLabel}
-          </p>
-
-          <p className="mt-4 max-w-4xl text-sm leading-7 text-white/55">
-            {conversation.summary}
-          </p>
+          <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-sm text-white/42">
+            <span>{conversation.customerPhone || "No phone captured"}</span>
+            <span>{conversation.channelLabel}</span>
+            <span>Owner: {conversation.ownerLabel}</span>
+            <span>Updated {formatTime(conversation.lastActivityAt)}</span>
+          </div>
         </div>
 
         <div className="flex flex-wrap gap-2 xl:max-w-[520px] xl:justify-end">
@@ -1434,50 +1933,6 @@ function SelectedConversationOverview({
     </section>
   );
 }
-
-function AiSummarySection({
-  conversation,
-}: {
-  conversation: ConversationDetail;
-}) {
-  return (
-    <PanelCard title="AI Summary" icon={<Sparkles size={18} />}>
-      <p className="text-sm leading-7 text-white/58">{conversation.summary}</p>
-
-      <div className="mt-5 grid gap-3 md:grid-cols-2">
-        <InfoBox label="Intent" value={conversation.intent || "Not detected"} />
-        <InfoBox label="Lead score" value={`${conversation.aiConfidence || 0}%`} />
-        <InfoBox label="Channel" value={conversation.channelLabel} />
-        <InfoBox label="Status" value={formatEnum(conversation.displayStatus)} />
-      </div>
-    </PanelCard>
-  );
-}
-
-function CustomerAndActionSection({
-  conversation,
-}: {
-  conversation: ConversationDetail;
-}) {
-  return (
-    <PanelCard title="Next Best Action" icon={<AlertTriangle size={18} />}>
-      <div className="rounded-[26px] border border-amber-500/20 bg-amber-500/10 p-5">
-        <p className="text-sm text-amber-100/60">Recommended next step</p>
-        <p className="mt-2 text-lg font-semibold leading-7 text-amber-100">
-          {conversation.nextAction}
-        </p>
-      </div>
-
-      <div className="mt-5 grid gap-3 md:grid-cols-2">
-        <InfoBox label="Customer" value={conversation.customerName} />
-        <InfoBox label="Phone" value={conversation.customerPhone || "No phone"} />
-        <InfoBox label="Email" value={conversation.customerEmail || "No email"} />
-        <InfoBox label="Source" value={conversation.source || "Unknown"} />
-      </div>
-    </PanelCard>
-  );
-}
-
 
 function ScheduledCallSection({
   conversation,
@@ -1524,309 +1979,527 @@ function ScheduledCallSection({
 
 function LeadRequirementsSection({
   conversation,
+  analysis,
 }: {
   conversation: ConversationDetail;
+  analysis: PostCallAnalysisView | null | undefined;
 }) {
-  const requirements = conversation.leadRequirements;
-  const booking = conversation.bookings?.[0];
-  const meetingLabel =
-    requirements?.meetingTime ||
-    (booking?.dateTime ? formatDateTime(booking.dateTime) : null);
-  const meetingSet = Boolean(requirements?.meetingScheduledAt || booking?.dateTime);
-  const bullets = (requirements?.raw || [])
-    .map((line) => String(line || "").trim())
-    .filter(Boolean)
-    .slice(-6);
+  const details = analysis?.requirementDetails || null;
+
+  const taskPurpose = conversation.tasks
+    .map((task) => task.scheduledCall?.purpose)
+    .find((value) => String(value || "").trim());
+
+  const customerNeed = [
+    details?.primaryNeed,
+    analysis?.requirementSummary,
+    conversation.scheduledCall?.purpose,
+    taskPurpose,
+    conversation.leadRequirements?.summary,
+  ]
+    .map((value) => cleanCustomerNeed(value))
+    .find(Boolean) || "";
+
+  const requestedNextStep = cleanRecommendedNextStep(
+    details?.requestedNextStep,
+  );
+  const conversationNextStep = cleanRecommendedNextStep(
+    conversation.nextAction,
+  );
+  const recommendedNextStep =
+    requestedNextStep || conversationNextStep;
+
+  const showRecommendedNextStep =
+    Boolean(recommendedNextStep) &&
+    normalizeComparableText(recommendedNextStep) !==
+      normalizeComparableText(customerNeed);
 
   return (
-    <PanelCard title="Lead Requirements" icon={<Sparkles size={18} />}>
-      {requirements ? (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge tone={requirements.captured ? "success" : "normal"}>
-              {requirements.captured ? "Requirements captured" : "Waiting for details"}
-            </Badge>
-            <Badge tone={meetingSet ? "success" : "warning"}>
-              {meetingSet ? "Meeting scheduled" : "Meeting time pending"}
-            </Badge>
-            <span className="text-xs text-white/35">
-              via {requirements.source || conversation.channelLabel}
-            </span>
+    <PanelCard title="Lead Requirement" icon={<Sparkles size={18} />}>
+      <div className="space-y-6">
+        {customerNeed ? (
+          <div className="rounded-[28px] border border-emerald-400/15 bg-emerald-400/[0.07] p-6">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200/70">
+              What the customer needs
+            </p>
+            <p className="mt-3 text-base leading-8 text-white/78">
+              {customerNeed}
+            </p>
           </div>
+        ) : (
+          <EmptyMini text="No clear customer requirement was captured." />
+        )}
 
-          <div className="overflow-hidden rounded-[28px] border border-emerald-400/15 bg-gradient-to-br from-emerald-400/10 via-white/[0.03] to-transparent">
-            <div className="border-b border-white/8 px-5 py-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200/70">
-                What the lead needs
-              </p>
-              <p className="mt-2 text-sm leading-7 text-white/72">
-                {requirements.summary}
-              </p>
-            </div>
-
-            {bullets.length > 0 ? (
-              <ul className="space-y-2.5 px-5 py-4">
-                {bullets.map((line, index) => (
-                  <li
-                    key={`${index}-${line.slice(0, 24)}`}
-                    className="flex gap-3 text-sm leading-6 text-white/58"
-                  >
-                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300/80" />
-                    <span>{line}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+        {showRecommendedNextStep ? (
+          <div className="rounded-[28px] border border-amber-400/20 bg-amber-400/[0.08] p-6">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-100/65">
+              Recommended next step
+            </p>
+            <p className="mt-3 text-base font-semibold leading-8 text-amber-50/90">
+              {recommendedNextStep}
+            </p>
           </div>
-
-          <div
-            className={`rounded-[28px] border p-5 ${
-              meetingSet
-                ? "border-sky-400/20 bg-sky-400/10"
-                : "border-amber-400/15 bg-amber-400/[0.07]"
-            }`}
-          >
-            <div className="flex items-start gap-3">
-              <div
-                className={`mt-0.5 rounded-2xl border p-2.5 ${
-                  meetingSet
-                    ? "border-sky-300/20 bg-sky-300/10 text-sky-100"
-                    : "border-amber-300/20 bg-amber-300/10 text-amber-100"
-                }`}
-              >
-                {meetingSet ? <CalendarCheck size={18} /> : <Clock3 size={18} />}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/40">
-                  Meeting slot
-                </p>
-                <p className="mt-2 text-base font-semibold leading-7 text-white/85">
-                  {meetingLabel || "Not set yet — AI will ask for availability"}
-                </p>
-                <p className="mt-1 text-xs leading-5 text-white/40">
-                  {meetingSet
-                    ? `${requirements.meetingStatus || booking?.status || "REQUESTED"} · visible on Bookings / dashboard`
-                    : "Shows here only after the caller gives a day and time and a booking is created."}
-                </p>
-                {requirements.bookingTitle ? (
-                  <p className="mt-3 truncate text-xs text-white/45">
-                    {requirements.bookingTitle}
-                  </p>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <EmptyMini text="After the AI call, collected requirements will appear here." />
-      )}
+        ) : null}
+      </div>
     </PanelCard>
   );
 }
 
 function PostCallIntelligenceSection({
+  conversation,
   analysis,
 }: {
+  conversation: ConversationDetail;
   analysis: PostCallAnalysisView | null | undefined;
 }) {
-  const details = analysis?.requirementDetails || null;
-  const capabilities = details?.desiredCapabilities || [];
-  const objections = details?.objections || [];
-  const status = analysis?.analysisStatus || "NONE";
+  const intent = resolveIntentPresentation(analysis, conversation.intent);
 
   return (
     <PanelCard title="Customer Intent" icon={<Sparkles size={18} />}>
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge
-            tone={
-              status === "COMPLETED"
-                ? intentTone(analysis?.intentLevel)
-                : status === "FAILED"
-                  ? "danger"
-                  : status === "PENDING" || status === "PROCESSING"
-                    ? "warning"
-                    : "muted"
-            }
-          >
-            {status === "COMPLETED"
-              ? intentLevelLabel(analysis?.intentLevel)
-              : analysisStatusLabel(status)}
-          </Badge>
-          {status === "COMPLETED" && analysis?.intentScore != null ? (
-            <Badge tone="normal">Score {analysis.intentScore}/100</Badge>
-          ) : null}
-          {status === "COMPLETED" && analysis?.confidence != null ? (
-            <span className="text-xs text-white/35">
-              Confidence {Math.round(analysis.confidence * 100)}%
-            </span>
+      {intent.emptyMessage ? (
+        <EmptyMini text={intent.emptyMessage} />
+      ) : (
+        <div className="rounded-[28px] border border-cyan-400/15 bg-cyan-400/[0.07] p-6">
+          <Badge tone={intent.tone}>{intent.label}</Badge>
+
+          {intent.priority ? (
+            <div className="mt-5">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-100/60">
+                Follow-up priority
+              </p>
+              <p className="mt-2 text-base font-semibold leading-8 text-white/82">
+                {intent.priority}
+              </p>
+            </div>
           ) : null}
         </div>
-
-        {status === "COMPLETED" && analysis?.requirementSummary ? (
-          <div className="rounded-[28px] border border-cyan-400/15 bg-cyan-400/10 p-5">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-100/70">
-              Lead requirement
-            </p>
-            <p className="mt-2 text-sm leading-7 text-white/72">
-              {analysis.requirementSummary}
-            </p>
-          </div>
-        ) : null}
-
-        {status === "COMPLETED" && capabilities.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
-            {capabilities.slice(0, 8).map((item) => (
-              <span
-                key={item}
-                className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/65"
-              >
-                {item}
-              </span>
-            ))}
-          </div>
-        ) : null}
-
-        {status === "COMPLETED" ? (
-          <div className="grid gap-3 md:grid-cols-2">
-            {details?.timelineSignal ? (
-              <InfoBox label="Timeline" value={details.timelineSignal} />
-            ) : null}
-            {details?.budgetSignal ? (
-              <InfoBox label="Budget signal" value={details.budgetSignal} />
-            ) : null}
-            {details?.requestedNextStep ? (
-              <InfoBox label="Requested next step" value={details.requestedNextStep} />
-            ) : null}
-            {details?.primaryNeed ? (
-              <InfoBox label="Primary need" value={details.primaryNeed} />
-            ) : null}
-          </div>
-        ) : null}
-
-        {status === "COMPLETED" && objections.length > 0 ? (
-          <div>
-            <p className="mb-2 text-xs uppercase tracking-[0.16em] text-white/35">
-              Objections
-            </p>
-            <ul className="space-y-2">
-              {objections.slice(0, 5).map((item) => (
-                <li key={item} className="text-sm leading-6 text-white/58">
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        {status === "PENDING" || status === "PROCESSING" ? (
-          <EmptyMini text="Call ended. Intent analysis will appear shortly." />
-        ) : null}
-        {status === "FAILED" ? (
-          <EmptyMini text="Analysis unavailable. No fabricated score was stored." />
-        ) : null}
-        {status === "INSUFFICIENT_DATA" ? (
-          <EmptyMini text="Not enough customer conversation to estimate intent." />
-        ) : null}
-        {status === "NONE" ? (
-          <EmptyMini text="Post-call intent appears after a completed AI voice call." />
-        ) : null}
-      </div>
+      )}
     </PanelCard>
   );
 }
 
 function TaskBookingSection({
   conversation,
+  teamMembers,
+  allBookings,
+  assignmentWorking,
+  onSendAvailabilityRequest,
 }: {
   conversation: ConversationDetail;
+  teamMembers: TeamUser[];
+  allBookings: Booking[];
+  assignmentWorking: boolean;
+  onSendAvailabilityRequest: (
+    booking: Booking,
+    employee: TeamUser,
+  ) => void | Promise<void>;
 }) {
+  const todayMeetings = conversation.bookings
+    .filter((booking) => isSameLocalDay(booking.dateTime, new Date()))
+    .sort(compareBookingDate);
+
+  const upcomingMeetings = conversation.bookings
+    .filter((booking) => {
+      if (!booking.dateTime) return false;
+      const date = new Date(booking.dateTime);
+      if (Number.isNaN(date.getTime())) return false;
+      return date.getTime() > endOfLocalDay(new Date()).getTime();
+    })
+    .sort(compareBookingDate);
+
+  const unscheduledMeetings = conversation.bookings.filter(
+    (booking) => !booking.dateTime,
+  );
+
+  const closedMeetings = conversation.bookings.filter((booking) => {
+    const status = String(booking.status || "").toUpperCase();
+    if (["COMPLETED", "CANCELLED", "NO_SHOW"].includes(status)) {
+      return !todayMeetings.some((item) => item.id === booking.id);
+    }
+
+    if (!booking.dateTime) return false;
+    const date = new Date(booking.dateTime);
+    return (
+      !Number.isNaN(date.getTime()) &&
+      date.getTime() < startOfLocalDay(new Date()).getTime()
+    );
+  });
+
   return (
-    <PanelCard title="Tasks & Bookings" icon={<Clock3 size={18} />}>
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <p className="mb-3 text-sm font-semibold text-white/65">Tasks</p>
+    <PanelCard title="Tasks & Meetings" icon={<Clock3 size={18} />}>
+      <div className="grid gap-8 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <section>
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold text-white/78">Tasks</h3>
+              <p className="mt-1 text-xs text-white/35">
+                Follow-up work created from this conversation
+              </p>
+            </div>
+            <Badge tone="normal">{conversation.tasks.length}</Badge>
+          </div>
 
           {conversation.tasks.length === 0 ? (
-            <EmptyMini text="No tasks created yet." />
+            <div className="mt-4">
+              <EmptyMini text="No follow-up tasks have been created." />
+            </div>
           ) : (
-            <div className="space-y-3">
-              {conversation.tasks.slice(0, 5).map((task) => (
+            <div className="mt-4 space-y-3">
+              {conversation.tasks.slice(0, 6).map((task) => (
                 <div
                   key={task.id}
-                  className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
+                  className="rounded-[24px] border border-white/10 bg-black/20 p-4"
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm font-medium leading-6">{task.title}</p>
+                    <p className="text-sm font-medium leading-6 text-white/76">
+                      {task.title}
+                    </p>
                     <Badge tone={task.delayed ? "danger" : "normal"}>
                       {formatEnum(task.status)}
                     </Badge>
                   </div>
-
-                  <p className="mt-2 text-xs leading-5 text-white/35">
-                    {task.assignedUser?.name || task.owner || "Unassigned"} ·{" "}
-                    {formatDateTime(task.dueAt)}
+                  <p className="mt-3 text-xs leading-5 text-white/36">
+                    {task.assignedUser?.name || task.owner || "Unassigned"}
+                    {task.dueAt ? ` · ${formatDateTime(task.dueAt)}` : ""}
                   </p>
                 </div>
               ))}
             </div>
           )}
-        </div>
+        </section>
 
-        <div>
-          <p className="mb-3 text-sm font-semibold text-white/65">Bookings</p>
-
-          {conversation.bookings.length === 0 ? (
-            <EmptyMini text="No bookings created yet." />
-          ) : (
-            <div className="space-y-3">
-              {conversation.bookings.slice(0, 5).map((booking) => (
-                <div
-                  key={booking.id}
-                  className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
-                >
-                  <p className="text-sm font-medium leading-6">
-                    {booking.title}
-                  </p>
-                  <p className="mt-2 text-xs leading-5 text-white/35">
-                    {formatDateTime(booking.dateTime)} ·{" "}
-                    {formatEnum(booking.status)}
-                  </p>
-                </div>
-              ))}
+        <section>
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold text-white/78">Meetings</h3>
+              <p className="mt-1 text-xs text-white/35">
+                Today first, then meetings scheduled after today
+              </p>
             </div>
-          )}
-        </div>
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = "/bookings";
+              }}
+              className="text-xs font-medium text-cyan-100/65 transition hover:text-cyan-100"
+            >
+              Open all meetings
+            </button>
+          </div>
+
+          <MeetingAssignmentPrompt
+            meetings={conversation.bookings}
+            teamMembers={teamMembers}
+            allBookings={allBookings}
+            working={assignmentWorking}
+            onSend={onSendAvailabilityRequest}
+          />
+
+          <MeetingGroup
+            title="Meetings today"
+            meetings={todayMeetings}
+            emptyText="No meetings scheduled for today."
+          />
+
+          <MeetingGroup
+            title="Upcoming meetings"
+            meetings={upcomingMeetings}
+            emptyText="No meetings scheduled after today."
+          />
+
+          {unscheduledMeetings.length > 0 ? (
+            <MeetingGroup
+              title="Needs scheduling"
+              meetings={unscheduledMeetings}
+              emptyText=""
+            />
+          ) : null}
+
+          {closedMeetings.length > 0 ? (
+            <p className="mt-5 text-xs text-white/30">
+              {closedMeetings.length} past or closed meeting
+              {closedMeetings.length === 1 ? "" : "s"} available on the Meetings page.
+            </p>
+          ) : null}
+        </section>
       </div>
     </PanelCard>
   );
 }
 
-function TimelineSection({
-  conversation,
+function MeetingAssignmentPrompt({
+  meetings,
+  teamMembers,
+  allBookings,
+  working,
+  onSend,
 }: {
-  conversation: ConversationDetail;
+  meetings: Booking[];
+  teamMembers: TeamUser[];
+  allBookings: Booking[];
+  working: boolean;
+  onSend: (booking: Booking, employee: TeamUser) => void | Promise<void>;
+}) {
+  const meeting = useMemo(() => {
+    const conversationMeeting =
+      meetings
+        .filter((booking) => {
+          if (!booking.dateTime || !isMeetingOpenForAssignment(booking)) {
+            return false;
+          }
+
+          const meetingTime = new Date(booking.dateTime).getTime();
+          return !Number.isNaN(meetingTime) && meetingTime >= Date.now();
+        })
+        .sort(compareBookingDate)[0] || null;
+
+    if (!conversationMeeting) return null;
+
+    return (
+      allBookings.find((booking) => booking.id === conversationMeeting.id) ||
+      conversationMeeting
+    );
+  }, [meetings, allBookings]);
+
+  const availableEmployees = useMemo(() => {
+    if (!meeting) return [];
+
+    return teamMembers.filter(
+      (employee) =>
+        employee.isActive !== false &&
+        !employeeHasMeetingConflict(employee.id, meeting, allBookings),
+    );
+  }, [meeting, teamMembers, allBookings]);
+
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
+
+  useEffect(() => {
+    if (!meeting || meeting.assignedUserId) {
+      setSelectedEmployeeId("");
+      return;
+    }
+
+    setSelectedEmployeeId((current) => {
+      if (
+        current &&
+        availableEmployees.some((employee) => employee.id === current)
+      ) {
+        return current;
+      }
+
+      return availableEmployees[0]?.id || "";
+    });
+  }, [meeting, availableEmployees]);
+
+  if (!meeting) return null;
+
+  const assignedEmployee =
+    meeting.assignedUser ||
+    teamMembers.find((employee) => employee.id === meeting.assignedUserId) ||
+    null;
+  const acceptanceStatus = String(
+    meeting.acceptanceStatus || "",
+  ).toUpperCase();
+
+  if (meeting.assignedUserId && assignedEmployee) {
+    const accepted = acceptanceStatus === "ACCEPTED";
+
+    return (
+      <div
+        className={`mt-6 rounded-[28px] border p-5 ${
+          accepted
+            ? "border-emerald-400/20 bg-emerald-400/[0.08]"
+            : "border-amber-400/20 bg-amber-400/[0.08]"
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <div
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border ${
+              accepted
+                ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100"
+                : "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            }`}
+          >
+            <UsersRound size={18} />
+          </div>
+
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-white/42">
+              Employee confirmation
+            </p>
+            <p className="mt-2 text-sm font-semibold leading-6 text-white/82">
+              {accepted
+                ? `${assignedEmployee.name} accepted this meeting.`
+                : `Availability request sent to ${assignedEmployee.name}.`}
+            </p>
+            <p className="mt-2 text-xs leading-5 text-white/40">
+              {formatDateTime(meeting.dateTime)} ·{" "}
+              {accepted ? "Accepted" : "Pending employee acceptance"}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (teamMembers.length === 0) {
+    return (
+      <div className="mt-6 rounded-[28px] border border-dashed border-white/10 p-5">
+        <p className="text-sm font-semibold text-white/72">
+          Employee assignment
+        </p>
+        <p className="mt-2 text-sm leading-6 text-white/38">
+          The lead requested {formatDateTime(meeting.dateTime)}. Add active
+          employees to AiraDesk before sending an availability request.
+        </p>
+      </div>
+    );
+  }
+
+  const selectedEmployee =
+    availableEmployees.find(
+      (employee) => employee.id === selectedEmployeeId,
+    ) || null;
+
+  return (
+    <div className="mt-6 rounded-[28px] border border-cyan-400/20 bg-cyan-400/[0.07] p-5">
+      <div className="flex items-start gap-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-100">
+          <CalendarCheck size={18} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-100/65">
+            Meeting requested by the lead
+          </p>
+          <p className="mt-2 text-base font-semibold leading-7 text-white/86">
+            {formatDateTime(meeting.dateTime)}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-white/48">
+            AiraDesk checked the meetings already assigned in the CRM. Choose
+            an employee who appears free and send the meeting for confirmation.
+          </p>
+        </div>
+      </div>
+
+      {availableEmployees.length === 0 ? (
+        <div className="mt-5 rounded-2xl border border-amber-400/20 bg-amber-400/[0.08] p-4">
+          <p className="text-sm font-semibold text-amber-100">
+            No employee appears free at this time.
+          </p>
+          <p className="mt-1 text-xs leading-5 text-amber-100/55">
+            Review the Meetings calendar before assigning this meeting.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="mt-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-white/38">
+              Employees who appear free
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {availableEmployees.map((employee) => {
+                const selected = employee.id === selectedEmployeeId;
+
+                return (
+                  <button
+                    key={employee.id}
+                    type="button"
+                    onClick={() => setSelectedEmployeeId(employee.id)}
+                    className={`rounded-2xl border p-4 text-left transition ${
+                      selected
+                        ? "border-white bg-white text-black"
+                        : "border-white/10 bg-black/20 text-white hover:bg-white/[0.07]"
+                    }`}
+                  >
+                    <p className="text-sm font-semibold">{employee.name}</p>
+                    <p
+                      className={`mt-1 text-xs ${
+                        selected ? "text-black/50" : "text-white/35"
+                      }`}
+                    >
+                      Available at the requested time
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={working || !selectedEmployee}
+            onClick={() => {
+              if (selectedEmployee) {
+                void onSend(meeting, selectedEmployee);
+              }
+            }}
+            className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-black transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {working ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Send size={16} />
+            )}
+            {selectedEmployee
+              ? `Ask ${selectedEmployee.name} to confirm availability`
+              : "Select an employee"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MeetingGroup({
+  title,
+  meetings,
+  emptyText,
+}: {
+  title: string;
+  meetings: Booking[];
+  emptyText: string;
 }) {
   return (
-    <PanelCard title="Timeline" icon={<Clock3 size={18} />}>
-      {conversation.timeline.length === 0 ? (
-        <EmptyMini text="No timeline yet." />
+    <div className="mt-6">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-white/38">
+          {title}
+        </p>
+        <span className="text-xs text-white/28">{meetings.length}</span>
+      </div>
+
+      {meetings.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-white/10 px-4 py-4 text-sm text-white/32">
+          {emptyText}
+        </div>
       ) : (
-        <div className="space-y-4">
-          {conversation.timeline.slice(0, 8).map((item) => (
-            <div key={`${item.type}-${item.id}`} className="border-l border-white/10 pl-4">
-              <p className="text-sm font-medium">{item.title}</p>
-              <p className="mt-1 line-clamp-2 text-sm leading-6 text-white/38">
-                {item.description}
-              </p>
-              <p className="mt-1 text-xs text-white/25">
-                {formatTime(item.createdAt)}
-              </p>
+        <div className="space-y-3">
+          {meetings.slice(0, 5).map((booking) => (
+            <div
+              key={booking.id}
+              className="rounded-[24px] border border-white/10 bg-black/20 p-4"
+            >
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium leading-6 text-white/76">
+                    {booking.title}
+                  </p>
+                  <p className="mt-2 text-xs text-white/36">
+                    {booking.dateTime
+                      ? formatDateTime(booking.dateTime)
+                      : "Date and time not set"}
+                  </p>
+                </div>
+                <Badge tone={bookingTone(booking.status)}>
+                  {bookingDisplayStatus(booking.status)}
+                </Badge>
+              </div>
             </div>
           ))}
         </div>
       )}
-    </PanelCard>
+    </div>
   );
 }
 
@@ -1856,7 +2529,7 @@ function ConversationWorkspace({
   return (
     <section
       id="conversation-workspace"
-      className="flex min-h-[calc(100vh-150px)] flex-col overflow-hidden rounded-[34px] border border-white/10 bg-white/[0.04]"
+      className="flex h-[calc(100vh-140px)] min-h-[680px] max-h-[900px] flex-col overflow-hidden rounded-[34px] border border-white/10 bg-white/[0.04]"
     >
       <header className="shrink-0 border-b border-white/10 bg-black/20 p-5">
         <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
@@ -1881,7 +2554,7 @@ function ConversationWorkspace({
             <p className="mt-2 text-sm text-white/40">
               {conversation.channel === "WHATSAPP"
                 ? "Reply to WhatsApp leads, create tasks, and book meetings from one CRM screen."
-                : "Large workspace for the real conversation. Reply, follow up, create tasks, or book meetings from here."}
+                : "Recording, collapsed transcript and technical call details are available here when needed."}
             </p>
           </div>
 
@@ -1910,33 +2583,37 @@ function ConversationWorkspace({
         )}
       </div>
 
-      <form
-        onSubmit={onSendReply}
-        className="shrink-0 border-t border-white/10 bg-black/25 p-4 md:p-5"
-      >
-        <div className="mx-auto flex max-w-5xl gap-3 rounded-[28px] border border-white/10 bg-black/35 p-2">
-          <input
-            value={reply}
-            onChange={(event) => setReply(event.target.value)}
-            placeholder={
-              conversation.channel === "AI_CALL"
-                ? "Add internal note or WhatsApp follow-up..."
-                : conversation.channel === "WHATSAPP"
+      {conversation.channel !== "AI_CALL" ? (
+        <form
+          onSubmit={onSendReply}
+          className="shrink-0 border-t border-white/10 bg-black/25 p-4 md:p-5"
+        >
+          <div className="mx-auto flex max-w-5xl gap-3 rounded-[28px] border border-white/10 bg-black/35 p-2">
+            <input
+              value={reply}
+              onChange={(event) => setReply(event.target.value)}
+              placeholder={
+                conversation.channel === "WHATSAPP"
                   ? "Type a WhatsApp reply from the CRM..."
                   : "Type a human reply..."
-            }
-            className="h-12 min-w-0 flex-1 bg-transparent px-4 text-sm outline-none placeholder:text-white/25"
-          />
+              }
+              className="h-12 min-w-0 flex-1 bg-transparent px-4 text-sm outline-none placeholder:text-white/25"
+            />
 
-          <button
-            disabled={sending || !reply.trim()}
-            className="flex h-12 items-center justify-center gap-2 rounded-2xl bg-white px-5 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {sending ? <Loader2 className="animate-spin" size={16} /> : <Send size={16} />}
-            Send
-          </button>
-        </div>
-      </form>
+            <button
+              disabled={sending || !reply.trim()}
+              className="flex h-12 items-center justify-center gap-2 rounded-2xl bg-white px-5 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {sending ? (
+                <Loader2 className="animate-spin" size={16} />
+              ) : (
+                <Send size={16} />
+              )}
+              Send
+            </button>
+          </div>
+        </form>
+      ) : null}
     </section>
   );
 }
@@ -2023,67 +2700,89 @@ function CallDetail({
   conversation: ConversationDetail;
   call: Call | null;
 }) {
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+
+  const transcript =
+    call?.transcript ||
+    call?.computedTranscript ||
+    conversation.computedTranscript ||
+    buildTranscriptFromMessages(conversation.messages) ||
+    "";
+
+  useEffect(() => {
+    if (!transcriptOpen) return;
+
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setTranscriptOpen(false);
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [transcriptOpen]);
+
   if (!call) {
     return (
       <EmptyState
         icon={<Phone size={30} />}
         title="No call record found"
-        description="Call information will appear here when Twilio sends call data to the backend."
+        description="Call information will appear here when the voice provider sends call data to the backend."
       />
     );
   }
 
-  const transcript =
-    call.transcript ||
-    call.computedTranscript ||
-    conversation.computedTranscript ||
-    buildTranscriptFromMessages(conversation.messages) ||
-    "";
-
   const recordingPlaybackUrl = getRecordingPlaybackUrl(call);
 
   return (
-    <div className="mx-auto max-w-5xl space-y-5">
-      <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
-        <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
-          <div>
-            <div className="flex items-center gap-2 text-sm text-white/50">
-              <Phone size={16} />
-              {call.direction || "INBOUND"} Call
+    <>
+      <div className="mx-auto max-w-5xl space-y-6">
+        <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
+          <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
+            <div>
+              <div className="flex items-center gap-2 text-sm text-white/50">
+                <Phone size={16} />
+                {formatEnum(call.direction || "INBOUND")} call
+              </div>
+
+              <h3 className="mt-3 text-3xl font-semibold tracking-[-0.05em]">
+                Call with {conversation.customerName}
+              </h3>
+
+              <p className="mt-3 text-sm text-white/40">
+                {call.phone || conversation.customerPhone} ·{" "}
+                {formatDateTime(call.startedAt || call.createdAt)} ·{" "}
+                {formatDuration(call.durationSeconds)}
+              </p>
             </div>
 
-            <h3 className="mt-3 text-3xl font-semibold tracking-[-0.05em]">
-              Call with {conversation.customerName}
-            </h3>
-
-            <p className="mt-3 text-sm text-white/40">
-              {call.phone || conversation.customerPhone} · {formatEnum(call.status)} ·{" "}
-              {formatDuration(call.durationSeconds)}
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-2 xl:justify-end">
-            <Badge
-              tone={
-                isLiveCallStatus(call.status)
-                  ? "warning"
-                  : ["MISSED", "NO_ANSWER", "BUSY", "CANCELED", "FAILED"].includes(
-                      call.status,
-                    )
-                  ? "danger"
-                  : "success"
-              }
-            >
-              {isLiveCallStatus(call.status) ? "Call ongoing" : "Call ended"}
-            </Badge>
-            <Badge tone="normal">{formatEnum(call.status)}</Badge>
-            {call.recordingUrl ? <Badge tone="success">Recording available</Badge> : null}
-            {transcript ? <Badge tone="success">Transcript saved</Badge> : null}
+            <div className="flex flex-wrap gap-2 xl:justify-end">
+              <Badge
+                tone={
+                  isLiveCallStatus(call.status)
+                    ? "warning"
+                    : ["MISSED", "NO_ANSWER", "BUSY", "CANCELED", "FAILED"].includes(
+                        call.status,
+                      )
+                      ? "danger"
+                      : "success"
+                }
+              >
+                {formatEnum(call.status)}
+              </Badge>
+              {recordingPlaybackUrl ? (
+                <Badge tone="success">Recording available</Badge>
+              ) : null}
+              {transcript ? <Badge tone="success">Transcript available</Badge> : null}
+            </div>
           </div>
         </div>
-      </div>
 
-      <div className="grid gap-5 xl:grid-cols-2">
         <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
           <div className="flex items-center gap-2 text-sm font-semibold text-white/70">
             <Headphones size={17} />
@@ -2091,113 +2790,106 @@ function CallDetail({
           </div>
 
           {recordingPlaybackUrl ? (
-            <div className="mt-5 space-y-4">
+            <div className="mt-5">
               <AuthenticatedAudioPlayer url={recordingPlaybackUrl} />
             </div>
           ) : (
             <p className="mt-5 text-sm leading-6 text-white/40">
-              Recording is not ready yet. Hume reconstruction may still be processing.
+              Recording is not ready yet. It will appear automatically after
+              provider processing is complete.
             </p>
           )}
         </div>
 
         <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
           <div className="flex items-center gap-2 text-sm font-semibold text-white/70">
-            <Sparkles size={17} />
-            Call outcome
+            <Mic2 size={17} />
+            Transcript
           </div>
 
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <InfoBox label="Intent" value={conversation.intent || "Not detected"} />
-            <InfoBox label="Priority" value={formatEnum(conversation.priority)} />
-            <InfoBox label="Next action" value={conversation.nextAction} />
-            <InfoBox label="Owner" value={conversation.ownerLabel} />
-          </div>
-        </div>
-      </div>
-
-      <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
-        <div className="flex items-center gap-2 text-sm font-semibold text-white/70">
-          <Sparkles size={17} />
-          Hume Conversation Insights
-        </div>
-        {call.humeExpressionAnalysis ? (
-          <div className="mt-5 space-y-3">
-            <div className="flex flex-wrap gap-2">
-              <Badge tone="normal">
-                Sync: {formatEnum(call.humeExpressionAnalysis.status || "PENDING")}
-              </Badge>
-              <Badge tone="normal">
-                User turns: {call.humeExpressionAnalysis.userTurnCount || 0}
-              </Badge>
+          <button
+            type="button"
+            onClick={() => setTranscriptOpen(true)}
+            disabled={!transcript}
+            className="mt-5 flex w-full items-center justify-between gap-5 rounded-[24px] border border-dashed border-white/15 bg-white/[0.035] px-5 py-5 text-left transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <div>
+              <p className="text-sm font-medium text-white/72">
+                {transcript ? "Full call transcript" : "Transcript unavailable"}
+              </p>
+              <p className="mt-1 text-xs text-white/34">
+                {transcript
+                  ? `${countWords(transcript)} words · collapsed until opened`
+                  : "No transcript has been saved for this call."}
+              </p>
             </div>
-            {(call.humeExpressionAnalysis.topExpressions || []).length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {(call.humeExpressionAnalysis.topExpressions || []).slice(0, 3).map((item) => (
-                  <Badge key={item.name} tone="success">
-                    {item.name}: {Math.round((item.score || 0) * 100)}%
-                  </Badge>
-                ))}
-              </div>
-            ) : null}
-            <p className="text-sm text-white/45">
-              These scores are vocal-expression analytics only and are not sales intent.
-            </p>
+
+            <span className="flex shrink-0 items-center gap-2 text-sm text-cyan-100/70">
+              {transcript ? "Open transcript" : "Not available"}
+              {transcript ? <ChevronDown size={16} /> : null}
+            </span>
+          </button>
+        </div>
+
+        <details className="rounded-[30px] border border-white/10 bg-black/20 p-6">
+          <summary className="cursor-pointer list-none text-sm font-semibold text-white/62">
+            Technical call details
+          </summary>
+
+          <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <InfoBox
+              label="Telephony"
+              value={call.telephonyProvider || call.provider || "TWILIO"}
+            />
+            <InfoBox
+              label="Voice agent"
+              value={call.voiceAgentProvider || "HUME_EVI"}
+            />
+            <InfoBox
+              label="Provider call ID"
+              value={call.providerCallId || "Not available"}
+            />
+            <InfoBox
+              label="Recording status"
+              value={call.recordingStatus || "Not available"}
+            />
+            <InfoBox
+              label="Recording duration"
+              value={
+                call.recordingDurationSeconds
+                  ? formatDuration(call.recordingDurationSeconds)
+                  : "Not available"
+              }
+            />
+            <InfoBox
+              label="Started"
+              value={formatDateTime(call.startedAt || call.createdAt)}
+            />
           </div>
-        ) : (
-          <p className="mt-5 text-sm text-white/40">
-            Expression insights will appear after Hume chat sync completes.
-          </p>
-        )}
-      </div>
+        </details>
 
-      <div className="grid gap-5 xl:grid-cols-3">
-        <InfoBox
-          label="Telephony"
-          value={call.telephonyProvider || call.provider || "TWILIO"}
-        />
-        <InfoBox
-          label="Voice agent"
-          value={call.voiceAgentProvider || "HUME_EVI"}
-        />
-        <InfoBox label="Provider call ID" value={call.providerCallId || "Not available"} />
-        <InfoBox label="Recording SID" value={call.recordingSid || "Not available"} />
-        <InfoBox label="Recording status" value={call.recordingStatus || "Not available"} />
-        <InfoBox
-          label="Recording duration"
-          value={
-            call.recordingDurationSeconds
-              ? formatDuration(call.recordingDurationSeconds)
-              : "Not available"
-          }
-        />
-        <InfoBox label="Started" value={formatDateTime(call.startedAt || call.createdAt)} />
-      </div>
+        {conversation.calls.length > 1 ? (
+          <details className="rounded-[30px] border border-white/10 bg-black/20 p-6">
+            <summary className="cursor-pointer list-none text-sm font-semibold text-white/62">
+              Previous calls ({conversation.calls.length - 1})
+            </summary>
 
-      {conversation.calls.length > 1 ? (
-        <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
-          <div className="flex items-center gap-2 text-sm font-semibold text-white/70">
-            <Clock3 size={17} />
-            Call history
-          </div>
-
-          <div className="mt-5 space-y-3">
-            {conversation.calls.map((item) => (
-              <div
-                key={item.id}
-                className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
-              >
-                <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
-                  <div>
-                    <p className="text-sm font-medium text-white/70">
-                      {item.phone || conversation.customerPhone || "Unknown phone"}
-                    </p>
-                    <p className="mt-1 text-xs text-white/35">
-                      {formatDateTime(item.createdAt)} · {formatDuration(item.durationSeconds)}
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
+            <div className="mt-5 space-y-3">
+              {conversation.calls.slice(1).map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
+                >
+                  <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
+                    <div>
+                      <p className="text-sm font-medium text-white/70">
+                        {item.phone || conversation.customerPhone || "Unknown phone"}
+                      </p>
+                      <p className="mt-1 text-xs text-white/35">
+                        {formatDateTime(item.createdAt)} ·{" "}
+                        {formatDuration(item.durationSeconds)}
+                      </p>
+                    </div>
                     <Badge
                       tone={
                         ["MISSED", "NO_ANSWER", "BUSY", "CANCELED", "FAILED"].includes(
@@ -2209,27 +2901,57 @@ function CallDetail({
                     >
                       {formatEnum(item.status)}
                     </Badge>
-                    {item.recordingUrl ? <Badge tone="success">Recording</Badge> : null}
-                    {item.transcript ? <Badge tone="success">Transcript</Badge> : null}
                   </div>
                 </div>
+              ))}
+            </div>
+          </details>
+        ) : null}
+      </div>
+
+      {transcriptOpen ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xl md:p-8"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Transcript for ${conversation.customerName}`}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setTranscriptOpen(false);
+          }}
+        >
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-[34px] border border-white/15 bg-[#080b12] shadow-[0_30px_120px_rgba(0,0,0,0.65)]">
+            <header className="flex shrink-0 items-start justify-between gap-5 border-b border-white/10 px-6 py-5 md:px-8">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100/55">
+                  Full call transcript
+                </p>
+                <h3 className="mt-2 text-2xl font-semibold tracking-[-0.04em]">
+                  {conversation.customerName}
+                </h3>
+                <p className="mt-2 text-sm text-white/36">
+                  {countWords(transcript)} words · {formatDateTime(call.createdAt)}
+                </p>
               </div>
-            ))}
+
+              <button
+                type="button"
+                onClick={() => setTranscriptOpen(false)}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-white/60 transition hover:bg-white/[0.10] hover:text-white"
+                aria-label="Close transcript"
+              >
+                <X size={19} />
+              </button>
+            </header>
+
+            <div className="inbox-scroll min-h-0 flex-1 overflow-y-auto px-6 py-6 md:px-8 md:py-8">
+              <p className="whitespace-pre-wrap text-[15px] leading-8 text-white/68">
+                {transcript}
+              </p>
+            </div>
           </div>
         </div>
       ) : null}
-
-      <div className="rounded-[30px] border border-white/10 bg-black/20 p-6">
-        <div className="flex items-center gap-2 text-sm font-semibold text-white/70">
-          <Mic2 size={17} />
-          Transcript
-        </div>
-
-        <p className="mt-5 whitespace-pre-wrap text-sm leading-8 text-white/60">
-          {transcript || "No transcript saved for this call yet."}
-        </p>
-      </div>
-    </div>
+    </>
   );
 }
 

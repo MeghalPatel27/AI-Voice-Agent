@@ -10,7 +10,6 @@ import {
   Inbox,
   LayoutDashboard,
   LineChart,
-  PhoneCall,
   Search,
   Settings,
   Sparkles,
@@ -21,7 +20,6 @@ import {
 import CommandCenter from "./commandcenter";
 import InboxPage from "./inbox";
 import CustomersPage from "./customers";
-import CallsPage from "./calls";
 import BookingsPage from "./bookings";
 import TasksPage from "./tasks";
 import SettingsPage from "./settings";
@@ -32,7 +30,6 @@ import AiCeoChat from "./aiCeoChat";
 type Section =
   | "Dashboard"
   | "Inbox"
-  | "Calls"
   | "Leads"
   | "Meetings"
   | "Tasks"
@@ -59,12 +56,6 @@ const navItems: NavItem[] = [
     label: "Inbox",
     icon: Inbox,
     path: "/inbox",
-    count: 0,
-  },
-  {
-    label: "Calls",
-    icon: PhoneCall,
-    path: "/calls",
     count: 0,
   },
   {
@@ -112,7 +103,7 @@ const sectionByPath: Record<string, Section> = {
   "/inbox": "Inbox",
   "/whatsapp": "Inbox",
 
-  "/calls": "Calls",
+  "/calls": "Inbox",
 
   "/leads": "Leads",
   "/customers": "Leads",
@@ -428,8 +419,6 @@ export default function LandingPage() {
                 <CommandCenter />
               ) : activeSection === "Inbox" ? (
                 <InboxPage />
-              ) : activeSection === "Calls" ? (
-                <CallsPage />
               ) : activeSection === "Leads" ? (
                 <CustomersPage />
               ) : activeSection === "Meetings" ? (
