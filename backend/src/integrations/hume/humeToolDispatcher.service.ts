@@ -19,6 +19,10 @@ import {
   scheduleMeetingSchema,
 } from "./humeToolSchemas";
 import { scheduleMeetingForVerifiedCall } from "../../services/humeMeetingScheduling.service";
+import {
+  armPostMeetingTermination,
+  runPostMeetingTerminationWatchdog,
+} from "../../services/callTermination.service";
 import { getHumeToolRuntimeConfig } from "./humeToolRuntime.config";
 import type { HumeWebhookPayload } from "./hume.types";
 
@@ -274,13 +278,24 @@ async function executeToolBusiness(input: {
       return {
         result: {
           success: false,
-          needsClarification: true,
-          clarificationQuestion: result.message,
+          needsClarification: result.needsClarification,
+          clarificationQuestion: result.needsClarification ? result.message : undefined,
+          message: result.needsClarification ? undefined : result.message,
           originalPhrase: result.originalPhrase,
+          conversationComplete: false,
+          mustHangUp: false,
         },
         isError: false,
       };
     }
+
+    await armPostMeetingTermination({
+      callId: call.id,
+      bookingId: result.booking.id,
+      toolCallId: input.toolCallId,
+      direction: call.direction,
+    });
+    void runPostMeetingTerminationWatchdog(call.id).catch(() => undefined);
 
     return {
       result: {
@@ -293,6 +308,9 @@ async function executeToolBusiness(input: {
         utcTimestamp: result.utcTimestamp,
         confirmationText: `${result.localDate} ${result.localTime} ${result.timezone}`,
         originalPhrase: result.originalPhrase,
+        conversationComplete: true,
+        nextAction: "close_and_hang_up",
+        mustHangUp: true,
       },
       isError: false,
     };

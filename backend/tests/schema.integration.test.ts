@@ -121,6 +121,30 @@ describe.runIf(runIntegration)("canonical schema integration", () => {
     expect(a.phone).toBe(b.phone);
   });
 
+  it("5b. enforces unique Twilio routing key across companies", async () => {
+    const routingKey = `+15716${suffix.slice(-6)}`;
+    await prisma.channelEndpoint.create({
+      data: {
+        companyId: companyAId,
+        channel: "VOICE",
+        provider: "TWILIO",
+        routingKey,
+        status: "ACTIVE",
+      },
+    });
+    await expect(
+      prisma.channelEndpoint.create({
+        data: {
+          companyId: companyBId,
+          channel: "VOICE",
+          provider: "TWILIO",
+          routingKey,
+          status: "ACTIVE",
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
   it("6. creates conversation and message", async () => {
     const conversation = await prisma.conversation.create({
       data: {
@@ -365,6 +389,38 @@ describe.runIf(runIntegration)("canonical schema integration", () => {
       },
     });
     expect(task.assignedUserId).toBe(userAId);
+  });
+
+  it("27b. supports unique post-meeting termination intent per call", async () => {
+    const booking = await prisma.booking.findFirst({
+      where: { callId: callAId, companyId: companyAId },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(booking).toBeTruthy();
+    await prisma.callTerminationIntent.create({
+      data: {
+        callId: callAId,
+        bookingId: booking!.id,
+        toolCallId: `tool-term-${suffix}`,
+        reason: "MEETING_SCHEDULED",
+        source: "HUME_MEETING_TOOL",
+        state: "ARMED",
+        graceDeadlineAt: new Date(Date.now() + 10_000),
+      },
+    });
+    await expect(
+      prisma.callTerminationIntent.create({
+        data: {
+          callId: callAId,
+          bookingId: booking!.id,
+          toolCallId: `tool-term-dup-${suffix}`,
+          reason: "MEETING_SCHEDULED",
+          source: "HUME_MEETING_TOOL",
+          state: "ARMED",
+          graceDeadlineAt: new Date(Date.now() + 10_000),
+        },
+      }),
+    ).rejects.toThrow();
   });
 
   it("28. supports outbound message queue", async () => {

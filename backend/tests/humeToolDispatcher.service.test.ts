@@ -5,6 +5,8 @@ const getHumeChatStatusMock = vi.hoisted(() => vi.fn());
 const loadContextMock = vi.hoisted(() => vi.fn());
 const invalidateCacheMock = vi.hoisted(() => vi.fn());
 const inboundFallbackMock = vi.hoisted(() => vi.fn());
+const armTerminationMock = vi.hoisted(() => vi.fn());
+const runTerminationWatchdogMock = vi.hoisted(() => vi.fn());
 
 const prismaMock = vi.hoisted(() => ({
   call: { findFirst: vi.fn(), update: vi.fn() },
@@ -13,9 +15,14 @@ const prismaMock = vi.hoisted(() => ({
     create: vi.fn(),
     update: vi.fn(),
   },
+  callTerminationIntent: {
+    upsert: vi.fn(),
+    findUnique: vi.fn(),
+    update: vi.fn(),
+  },
   customer: { update: vi.fn() },
   conversation: { update: vi.fn() },
-  booking: { create: vi.fn() },
+  booking: { create: vi.fn(), findFirst: vi.fn() },
   $transaction: vi.fn(async (fn: any) =>
     fn({
       customer: { update: prismaMock.customer.update },
@@ -76,6 +83,10 @@ vi.mock("../src/integrations/hume/humeToolRuntime.config", () => ({
     contextCacheTtlSeconds: 120,
   }),
 }));
+vi.mock("../src/services/callTermination.service", () => ({
+  armPostMeetingTermination: armTerminationMock,
+  runPostMeetingTerminationWatchdog: runTerminationWatchdogMock,
+}));
 
 import { HumeControlPlaneError } from "../src/integrations/hume/hume.client";
 import { handleHumeToolCall } from "../src/integrations/hume/humeTool.service";
@@ -122,6 +133,12 @@ describe("Hume tool delivery dispatcher", () => {
       customer: { name: null },
       recentContext: { summary: null, knownRequirements: [] },
     });
+    prismaMock.booking.findFirst.mockResolvedValue(null);
+    armTerminationMock.mockResolvedValue({
+      id: "intent-1",
+      state: "ARMED",
+    });
+    runTerminationWatchdogMock.mockResolvedValue(undefined);
     // delivery path re-reads receipt
     prismaMock.humeToolCallReceipt.findUnique
       .mockResolvedValueOnce(null)
@@ -581,5 +598,56 @@ describe("Hume tool delivery dispatcher", () => {
         }),
       }),
     );
+  });
+
+  it("meeting success response marks conversationComplete and mustHangUp", async () => {
+    prismaMock.call.findFirst.mockResolvedValue(baseCall({ metadata: {} }));
+    prismaMock.booking.create.mockResolvedValue({
+      id: "book-1",
+      createdAt: new Date("2026-07-29T08:00:00.000Z"),
+    });
+    prismaMock.humeToolCallReceipt.findUnique
+      .mockReset()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({
+        toolCallId: "tool-meeting",
+        deliveryStatus: "PENDING",
+        deliveryAttempts: 0,
+        businessStatus: "COMPLETED",
+      });
+
+    await handleHumeToolCall({
+      event_name: "tool_call",
+      chat_id: "chat-1",
+      config_id: "cfg-1",
+      tool_call_message: {
+        name: "airadesk_schedule_meeting",
+        tool_call_id: "tool-meeting",
+        parameters: JSON.stringify({
+          preferredTimeText: "tomorrow 2 pm",
+          timezone: "Asia/Kolkata",
+        }),
+        response_required: true,
+      },
+    } as any);
+
+    const sent = sendHumeToolResponseMock.mock.calls.find(
+      (entry) => entry?.[1]?.tool_call_id === "tool-meeting",
+    );
+    const payload = sent?.[1];
+    expect(payload).toBeTruthy();
+    const content = JSON.parse(String(payload.content || "{}"));
+    expect(content.success).toBe(true);
+    expect(content.conversationComplete).toBe(true);
+    expect(content.mustHangUp).toBe(true);
+    expect(content.nextAction).toBe("close_and_hang_up");
+    expect(armTerminationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: "call-1",
+        bookingId: "book-1",
+        toolCallId: "tool-meeting",
+      }),
+    );
+    expect(runTerminationWatchdogMock).toHaveBeenCalledWith("call-1");
   });
 });

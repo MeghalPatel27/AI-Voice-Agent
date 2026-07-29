@@ -10,6 +10,8 @@ const {
   taskFindFirstMock,
   taskFindManyMock,
   taskUpdateMock,
+  messageFindManyMock,
+  callCountMock,
   transactionMock,
 } = vi.hoisted(() => ({
   findFirstMock: vi.fn(),
@@ -21,6 +23,8 @@ const {
   taskFindFirstMock: vi.fn(),
   taskFindManyMock: vi.fn(),
   taskUpdateMock: vi.fn(),
+  messageFindManyMock: vi.fn(),
+  callCountMock: vi.fn(),
   transactionMock: vi.fn(),
 }));
 
@@ -29,6 +33,10 @@ vi.mock("../src/db/prisma", () => ({
     call: {
       findFirst: findFirstMock,
       findUnique: vi.fn(),
+      count: callCountMock,
+    },
+    message: {
+      findMany: messageFindManyMock,
     },
     $transaction: transactionMock,
   },
@@ -142,6 +150,8 @@ describe("finalizeCall", () => {
     mockTx();
     taskFindFirstMock.mockResolvedValue(null);
     taskFindManyMock.mockResolvedValue([]);
+    messageFindManyMock.mockResolvedValue(makeCall().conversation.messages);
+    callCountMock.mockResolvedValue(1);
   });
 
   it("finalizes an ongoing call from a customer-end event and queues analysis", async () => {

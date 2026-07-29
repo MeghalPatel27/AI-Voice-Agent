@@ -26,6 +26,7 @@ import {
   findCallByTwilioSid,
   persistHumeChatCorrelation,
 } from "../integrations/hume/humeChatCorrelation.service";
+import { markPostMeetingTerminationSatisfied } from "./callTermination.service";
 
 export type LifecycleSource = "TWILIO" | "HUME" | "RECONCILER" | "SYNC" | "SYSTEM";
 
@@ -678,7 +679,7 @@ export async function applyTwilioLifecycleEvent(input: {
 
   // Even if the status transition was ignored (already terminal), still
   // reconcile Task / post-call jobs from the verified terminal evidence.
-  return finalizeCallLifecycle({
+  const finalized = await finalizeCallLifecycle({
     callId: call.id,
     companyId: call.conversation.companyId,
     endReason: `twilio_status_${input.twilioStatus}`,
@@ -690,6 +691,11 @@ export async function applyTwilioLifecycleEvent(input: {
     source: "TWILIO",
     humeChatId: call.humeChatId,
   });
+  await markPostMeetingTerminationSatisfied({
+    callId: call.id,
+    source: "TWILIO_TERMINAL",
+  });
+  return finalized;
 }
 
 export async function applyHumeChatEndedLifecycle(input: {
@@ -784,7 +790,7 @@ export async function applyHumeChatEndedLifecycle(input: {
       : "COMPLETED"
   ) as DbCallStatus;
 
-  return finalizeCallLifecycle({
+  const finalized = await finalizeCallLifecycle({
     callId: call.id,
     companyId: call.conversation.companyId,
     endReason: humeEndReason,
@@ -795,6 +801,11 @@ export async function applyHumeChatEndedLifecycle(input: {
     source: "HUME",
     humeChatId: call.humeChatId,
   });
+  await markPostMeetingTerminationSatisfied({
+    callId: call.id,
+    source: "HUME_CHAT_ENDED",
+  });
+  return finalized;
 }
 
 export { mapTwilioStatusToCallStatus, shouldApplyCallStatus, TERMINAL_CALL_STATUSES };

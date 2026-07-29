@@ -163,13 +163,20 @@ export async function prepareScheduledAiCallForTask(
     return { skipped: true, reason: `Task status is ${notes.status}` };
   }
 
-  if (notes.callSid || notes.conversationId) {
+  if (notes.callSid || notes.conversationId || notes.callId) {
     const existingCall = await client.call.findFirst({
       where: {
         OR: [
           notes.callSid ? { twilioCallSid: notes.callSid } : undefined,
+          notes.callSid ? { providerCallId: notes.callSid } : undefined,
+          notes.callId ? { id: notes.callId } : undefined,
           notes.conversationId ? { conversationId: notes.conversationId } : undefined,
-        ].filter(Boolean) as Array<{ twilioCallSid?: string; conversationId?: string }>,
+        ].filter(Boolean) as Array<{
+          twilioCallSid?: string;
+          providerCallId?: string;
+          id?: string;
+          conversationId?: string;
+        }>,
       },
       select: { id: true },
     });
@@ -255,25 +262,6 @@ export async function prepareScheduledAiCallForTask(
     },
   });
 
-  await client.message.create({
-    data: {
-      conversationId: conversation.id,
-      senderType: "AI",
-      body: [
-        "Scheduled AI call task started.",
-        notes.fullName ? `Client name: ${notes.fullName}` : "",
-        `Phone: ${phone}`,
-        `Scheduled call time: ${scheduledAtLabel}`,
-        notes.collectionGoal ? `Collection goal: ${notes.collectionGoal}` : "",
-        notes.callPurpose ? `Call purpose: ${notes.callPurpose}` : "",
-        notes.extraNotes ? `Private notes: ${notes.extraNotes}` : "",
-        `Preferred language: ${preferredLanguageLabel}`,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    },
-  });
-
   const call = await client.call.create({
     data: {
       conversationId: conversation.id,
@@ -316,6 +304,26 @@ export async function prepareScheduledAiCallForTask(
     },
   });
 
+  await client.message.create({
+    data: {
+      conversationId: conversation.id,
+      callId: call.id,
+      senderType: "AI",
+      body: [
+        "Scheduled AI call task started.",
+        notes.fullName ? `Client name: ${notes.fullName}` : "",
+        `Phone: ${phone}`,
+        `Scheduled call time: ${scheduledAtLabel}`,
+        notes.collectionGoal ? `Collection goal: ${notes.collectionGoal}` : "",
+        notes.callPurpose ? `Call purpose: ${notes.callPurpose}` : "",
+        notes.extraNotes ? `Private notes: ${notes.extraNotes}` : "",
+        `Preferred language: ${preferredLanguageLabel}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    },
+  });
+
   await client.task.update({
     where: {
       id: task.id,
@@ -329,6 +337,7 @@ export async function prepareScheduledAiCallForTask(
         status: "CALLING",
         preferredLanguage,
         conversationId: conversation.id,
+        callId: call.id,
         startedAt: new Date().toISOString(),
       }),
     },

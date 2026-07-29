@@ -282,7 +282,6 @@ describe("CallsPage", () => {
       expect(screen.getAllByText("Asha Patel").length).toBeGreaterThan(0);
     });
 
-    expect(screen.getAllByText(/Customer wants a redesigned marketing site/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Website redesign with booking/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText("High interest").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Hume voice insights/i).length).toBeGreaterThan(0);

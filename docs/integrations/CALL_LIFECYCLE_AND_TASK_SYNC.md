@@ -157,6 +157,19 @@ Unsafe / not auto-completed:
 
 - Stale active Calls without verified provider terminal evidence (reported only)
 
+### Post-meeting termination reconciliation
+
+```bash
+cd backend
+npm run calls:reconcile-termination -- --dry-run
+npm run calls:reconcile-termination -- --apply
+```
+
+- Operates on exact `CallTerminationIntent` rows only.
+- Never matches by customer phone.
+- Never terminates ambiguous records.
+- Terminal Twilio/Hume lifecycle evidence still drives canonical finalization.
+
 ## Troubleshooting Task stuck in Doing
 
 1. Confirm related Call via `metadata.taskId` / `aiNotes.callSid`

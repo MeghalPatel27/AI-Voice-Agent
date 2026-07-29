@@ -57,6 +57,9 @@ export async function handleTwilioStatus(req: AuthRequest, res: Response) {
         callSid,
         twilioStatus: callStatus,
         durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
+        fromNumber: String(req.body.From || ""),
+        toNumber: String(req.body.To || ""),
+        direction: String(req.body.Direction || ""),
       });
     }
     return res.status(204).send();

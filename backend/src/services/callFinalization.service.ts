@@ -7,6 +7,10 @@ import type {
 } from "@prisma/client";
 import { prisma } from "../db/prisma";
 import {
+  buildLabeledTranscriptLines,
+  loadCallScopedMessages,
+} from "./callTranscript.service";
+import {
   extractRelatedTaskId,
   mapCallStatusToTaskTerminal,
   isSuccessfulTerminalStatus,
@@ -232,6 +236,15 @@ function resolveTerminalStatus(input: FinalizeCallInput): DbCallStatus {
 }
 
 async function findCallForFinalize(input: FinalizeCallInput) {
+  const include = {
+    conversation: {
+      include: {
+        customer: true,
+      },
+    },
+    postAnalysis: true,
+  } as const;
+
   if (input.callId) {
     const byId = await prisma.call.findFirst({
       where: {
@@ -244,18 +257,7 @@ async function findCallForFinalize(input: FinalizeCallInput) {
             }
           : {}),
       },
-      include: {
-        conversation: {
-          include: {
-            customer: true,
-            messages: {
-              orderBy: { createdAt: "asc" },
-              take: 200,
-            },
-          },
-        },
-        postAnalysis: true,
-      },
+      include,
     });
 
     if (byId) return byId;
@@ -274,27 +276,17 @@ async function findCallForFinalize(input: FinalizeCallInput) {
             }
           : {}),
       },
-      include: {
-        conversation: {
-          include: {
-            customer: true,
-            messages: {
-              orderBy: { createdAt: "asc" },
-              take: 200,
-            },
-          },
-        },
-        postAnalysis: true,
-      },
+      include,
     });
 
     if (bySid) return bySid;
     if (input.companyId) return null;
   }
 
-  if (input.conversationId) {
+  if (input.conversationId && input.callId) {
     return prisma.call.findFirst({
       where: {
+        id: input.callId,
         conversationId: input.conversationId,
         ...(input.companyId
           ? {
@@ -304,19 +296,7 @@ async function findCallForFinalize(input: FinalizeCallInput) {
             }
           : {}),
       },
-      orderBy: { createdAt: "desc" },
-      include: {
-        conversation: {
-          include: {
-            customer: true,
-            messages: {
-              orderBy: { createdAt: "asc" },
-              take: 200,
-            },
-          },
-        },
-        postAnalysis: true,
-      },
+      include,
     });
   }
 
@@ -413,17 +393,35 @@ export async function finalizeCall(
     nextStatus = call.status as DbCallStatus;
   }
 
-  const transcript = buildTranscriptFromMessages(conversation.messages);
-  const leadSummary = buildLeadSummary(conversation.messages);
+  const callMessages = await loadCallScopedMessages(
+    call.id,
+    conversation.id,
+  );
+  const transcript =
+    call.transcript?.trim() ||
+    buildLabeledTranscriptLines(callMessages) ||
+    buildTranscriptFromMessages(callMessages);
+  const leadSummary = buildLeadSummary(callMessages);
   const meetingTimeText = extractPreferredMeetingTimeFromText(
-    conversation.messages
+    callMessages
       .filter((message) => message.senderType === "CUSTOMER")
       .map((message) => message.body)
       .join("\n"),
   );
 
+  const capturedSummary =
+    typeof (call.metadata as Record<string, unknown> | null)?.capturedRequirementSummary ===
+    "string"
+      ? String(
+          (call.metadata as Record<string, unknown>).capturedRequirementSummary,
+        )
+      : null;
+
   const summary =
-    conversation.aiSummary &&
+    call.summary?.trim() ||
+    capturedSummary ||
+    call.postAnalysis?.requirementSummary ||
+    (conversation.aiSummary &&
     !conversation.aiSummary.toLowerCase().includes("call started") &&
     !conversation.aiSummary
       .toLowerCase()
@@ -431,9 +429,9 @@ export async function finalizeCall(
       ? conversation.aiSummary
       : `Lead requirements: ${leadSummary}${
           meetingTimeText ? ` Meeting time: ${meetingTimeText}` : ""
-        }`.slice(0, 500);
+        }`.slice(0, 500));
 
-  const usefulTurns = conversation.messages.filter(
+  const usefulTurns = callMessages.filter(
     (message) =>
       message.senderType === "CUSTOMER" &&
       isUsefulCustomerRequirement(message.body),

@@ -15,6 +15,7 @@ import {
   HUME_SYSTEM_PROMPT_TEXT,
   HUME_SYSTEM_PROMPT_VERSION,
   computePromptChecksum,
+  normalizePromptText,
 } from "../src/integrations/hume/humeSystemPrompt";
 import { HUME_LATENCY_TARGETS } from "../src/integrations/hume/humeLatencyTargets";
 
@@ -79,7 +80,7 @@ function redactParameters(parameters: unknown) {
 }
 
 function readRemotePromptText(remote: any) {
-  return String(remote?.prompt?.text || remote?.system_prompt || "").trim();
+  return normalizePromptText(String(remote?.prompt?.text || remote?.system_prompt || ""));
 }
 
 async function listAllTools(): Promise<RemoteTool[]> {

@@ -13,8 +13,8 @@ const prismaMock = vi.hoisted(() => ({
     update: vi.fn(),
   },
   call: { findFirst: vi.fn(), update: vi.fn(), create: vi.fn() },
+  channelEndpoint: { findMany: vi.fn() },
   customer: { findFirst: vi.fn(), create: vi.fn() },
-  company: { findUnique: vi.fn() },
   conversation: { create: vi.fn() },
   humeToolCallReceipt: {
     findUnique: vi.fn(),
@@ -70,7 +70,13 @@ describe("non-call Hume integration fixtures", () => {
     prismaMock.humeWebhookReceipt.findUnique.mockResolvedValue(null);
     prismaMock.humeWebhookReceipt.create.mockResolvedValue({});
     prismaMock.humeWebhookReceipt.update.mockResolvedValue({});
-    prismaMock.company.findUnique.mockResolvedValue({ id: "co-1" });
+    prismaMock.channelEndpoint.findMany.mockResolvedValue([
+      {
+        id: "endpoint-1",
+        companyId: "co-1",
+        company: { id: "co-1", name: "Easyestate.in" },
+      },
+    ]);
     prismaMock.customer.findFirst.mockResolvedValue({ id: "cust-1" });
     handleToolMock.mockResolvedValue({ acknowledged: true, delivered: true });
     prewarmMock.mockResolvedValue(undefined);
@@ -81,7 +87,9 @@ describe("non-call Hume integration fixtures", () => {
       id: "call-1",
       status: "RINGING",
       twilioCallSid: "CA111",
+      providerCallId: "CA111",
       metadata: {},
+      conversation: { companyId: "co-1" },
     });
     prismaMock.call.update.mockResolvedValue({ id: "call-1" });
 
@@ -90,7 +98,11 @@ describe("non-call Hume integration fixtures", () => {
       chat_id: "chat-a",
       chat_group_id: "cg-a",
       config_id: "cfg-1",
-      twilio_metadata: { call_sid: "CA111" },
+      twilio_metadata: {
+        call_sid: "CA111",
+        from_number: "+14155550100",
+        to_number: "+15716095892",
+      },
     } as any);
 
     expect(prismaMock.call.update).toHaveBeenCalledWith(
@@ -166,7 +178,7 @@ describe("non-call Hume integration fixtures", () => {
       "../src/integrations/hume/humeSystemPrompt"
     );
     expect(HUME_SYSTEM_PROMPT_TEXT).toMatch(/Hello, are you there\?/);
-    expect(HUME_SYSTEM_PROMPT_TEXT).toMatch(/Do not repeatedly check in/i);
+    expect(HUME_SYSTEM_PROMPT_TEXT).toMatch(/Never repeat check-ins\./i);
   });
 
   it("signed fixture helper produces verifiable digest shape", () => {

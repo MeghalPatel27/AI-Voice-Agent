@@ -1,3 +1,11 @@
+## Per-call isolation (July 2026)
+
+See [PER_CALL_DATA_ISOLATION_AND_INBOUND_CALLS.md](./PER_CALL_DATA_ISOLATION_AND_INBOUND_CALLS.md).
+
+- Transcript `Message` rows are scoped with `Message.callId`.
+- Hume sync writes and reads messages only for the syncing Call.
+- Reconciliation never uses phone number or latest-chat heuristics.
+
 ## Meeting recovery note
 
 - `FUNCTION_CALL` presence in Hume Chat History is evidence of intent, not proof of local booking commit.

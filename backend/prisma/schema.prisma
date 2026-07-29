@@ -117,6 +117,19 @@ enum RecordingReconstructionStatus {
   NOT_REQUESTED
 }
 
+enum ChannelEndpointChannel {
+  VOICE
+}
+
+enum ChannelEndpointProvider {
+  TWILIO
+}
+
+enum ChannelEndpointStatus {
+  ACTIVE
+  INACTIVE
+}
+
 enum CallIntentLevel {
   VERY_HIGH
   HIGH
@@ -166,6 +179,22 @@ enum BookingOutcome {
   FOLLOW_UP
 }
 
+enum CallTerminationReason {
+  MEETING_SCHEDULED
+}
+
+enum CallTerminationSource {
+  HUME_MEETING_TOOL
+  RECONCILIATION
+}
+
+enum CallTerminationIntentState {
+  ARMED
+  SATISFIED
+  CANCELED
+  FAILED
+}
+
 model Company {
   id        String   @id @default(cuid())
   name      String
@@ -188,6 +217,25 @@ model Company {
   auditLogs              AuditLog[]
   integrationConnections IntegrationConnection[]
   callPostAnalyses       CallPostAnalysis[]
+  channelEndpoints       ChannelEndpoint[]
+}
+
+model ChannelEndpoint {
+  id         String                  @id @default(uuid())
+  companyId  String
+  channel    ChannelEndpointChannel
+  provider   ChannelEndpointProvider
+  routingKey String
+  status     ChannelEndpointStatus   @default(ACTIVE)
+  metadata   Json?
+  createdAt  DateTime                @default(now())
+  updatedAt  DateTime                @default(now()) @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, routingKey])
+  @@index([companyId])
+  @@index([channel, provider, status])
 }
 
 model CompanySettings {
@@ -411,6 +459,7 @@ model Conversation {
 model Message {
   id             String        @id @default(uuid())
   conversationId String
+  callId         String?
   senderType     MessageSender
   body           String
 
@@ -424,8 +473,10 @@ model Message {
   createdAt DateTime @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  call         Call?        @relation(fields: [callId], references: [id], onDelete: SetNull)
 
   @@index([conversationId])
+  @@index([callId])
   @@index([senderType])
   @@index([provider])
   @@index([providerMessageId])
@@ -486,11 +537,13 @@ model Call {
 
   conversation           Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   assignedUser           User?                 @relation("CallAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  messages               Message[]
   postAnalysis           CallPostAnalysis?
   humeExpressionAnalysis HumeExpressionAnalysis?
   humeSyncJobs           HumeChatSyncJob[]
   humeToolCalls          HumeToolCallReceipt[]
   bookings               Booking[]
+  terminationIntents     CallTerminationIntent[]
 
   @@index([conversationId])
   @@index([assignedUserId])
@@ -506,6 +559,34 @@ model Call {
   @@index([recordingSid])
   @@index([createdAt])
   @@index([updatedAt])
+}
+
+model CallTerminationIntent {
+  id               String                     @id @default(uuid())
+  callId            String
+  bookingId         String?
+  toolCallId        String?
+  reason            CallTerminationReason
+  source            CallTerminationSource
+  state             CallTerminationIntentState @default(ARMED)
+  requestedAt       DateTime                  @default(now())
+  graceDeadlineAt   DateTime
+  attemptCount      Int                       @default(0)
+  lastAttemptAt     DateTime?
+  lastProviderState String?
+  lastErrorCategory String?
+  metadata          Json?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  call    Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@unique([callId, reason])
+  @@index([state, graceDeadlineAt])
+  @@index([toolCallId])
+  @@index([bookingId])
+  @@index([requestedAt])
 }
 
 model HumeWebhookReceipt {
@@ -747,6 +828,7 @@ model Booking {
   customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   call         Call?         @relation(fields: [callId], references: [id], onDelete: SetNull)
+  terminationIntents CallTerminationIntent[]
   assignedUser User?         @relation("BookingAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
   acceptedBy   User?         @relation("BookingAcceptedBy", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
 

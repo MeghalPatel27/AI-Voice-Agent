@@ -1,6 +1,7 @@
 import { prisma } from "../../db/prisma";
 import { finalizeCall } from "../../services/callFinalization.service";
 import { enqueuePostCallProcessing } from "../../services/callLifecycle.service";
+import { callScopedMessageWhere } from "../../services/callTranscript.service";
 import {
   persistHumeChatCorrelation,
   resolveHumeChatForCall,
@@ -105,7 +106,7 @@ export async function syncHumeChatForCall(callId: string) {
   for (const line of lines) {
     const existing = await prisma.message.findFirst({
       where: {
-        conversationId: call.conversationId,
+        callId: call.id,
         provider: "hume_evi",
         providerMessageId: line.providerMessageId,
       },
@@ -115,6 +116,7 @@ export async function syncHumeChatForCall(callId: string) {
       await prisma.message.create({
         data: {
           conversationId: call.conversationId,
+          callId: call.id,
           senderType: line.speaker,
           body: line.body,
           provider: "hume_evi",
@@ -128,7 +130,7 @@ export async function syncHumeChatForCall(callId: string) {
 
   const transcriptMessages = await prisma.message.findMany({
     where: {
-      conversationId: call.conversationId,
+      ...callScopedMessageWhere(call.id, call.conversationId),
       provider: "hume_evi",
       providerStatus: { not: "interrupted" },
     },

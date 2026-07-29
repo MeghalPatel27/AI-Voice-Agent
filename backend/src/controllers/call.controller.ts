@@ -5,8 +5,14 @@ import { prisma } from "../db/prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
 import {
   pickLatestCompletedCallAnalysis,
+  pickCallAnalysis,
   withPostCallAnalysis,
 } from "../services/postCallAnalysisApi.service";
+import {
+  buildTranscriptTextFromMessages,
+  loadCallScopedMessages,
+  resolveCallTranscript,
+} from "../services/callTranscript.service";
 
 const updateCallAssignmentSchema = z.object({
   assignedUserId: z.string().uuid().nullable(),
@@ -627,11 +633,15 @@ export async function getCallConversationById(req: AuthRequest, res: Response) {
       });
     }
 
-    const computedTranscript = buildTranscriptFromMessages(
-      conversation.messages
-    );
-
     const latestCall = conversation.calls[0] || null;
+
+    const scopedMessages = latestCall
+      ? await loadCallScopedMessages(latestCall.id, conversation.id)
+      : [];
+
+    const computedTranscript =
+      (latestCall?.transcript && latestCall.transcript.trim()) ||
+      buildTranscriptFromMessages(scopedMessages);
 
     return res.json({
       conversation: withConversationRecordingUrls({
@@ -676,6 +686,7 @@ export async function getCallById(req: AuthRequest, res: Response) {
           include: {
             customer: true,
             messages: {
+              where: { callId: id },
               orderBy: {
                 createdAt: "asc",
               },
@@ -686,6 +697,7 @@ export async function getCallById(req: AuthRequest, res: Response) {
               },
             },
             bookings: {
+              where: { callId: id },
               orderBy: {
                 createdAt: "desc",
               },
@@ -710,12 +722,18 @@ export async function getCallById(req: AuthRequest, res: Response) {
       });
     }
 
+    const scopedMessages = await loadCallScopedMessages(
+      call.id,
+      call.conversationId,
+    );
+    const computedTranscript =
+      (call.transcript && call.transcript.trim()) ||
+      buildTranscriptFromMessages(scopedMessages);
+
     return res.json({
       call: withCallApiFields({
         ...call,
-        computedTranscript: buildTranscriptFromMessages(
-          call.conversation.messages
-        ),
+        computedTranscript,
       }),
     });
   } catch (error) {

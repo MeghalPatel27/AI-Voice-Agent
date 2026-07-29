@@ -8,6 +8,7 @@ import {
   HUME_SYSTEM_PROMPT_CHECKSUM,
   HUME_SYSTEM_PROMPT_VERSION,
   computePromptChecksum,
+  normalizePromptText,
 } from "../src/integrations/hume/humeSystemPrompt";
 
 const REQUIRED_EVENTS = ["chat_started", "chat_ended", "tool_call"] as const;
@@ -158,7 +159,9 @@ async function main() {
     (event) => !webhookEvents.includes(event),
   );
 
-  const remotePromptText = String(remote?.prompt?.text || remote?.system_prompt || "");
+  const remotePromptText = normalizePromptText(
+    String(remote?.prompt?.text || remote?.system_prompt || ""),
+  );
   const turnDetection = remote?.turn_detection || {};
   const interruption = remote?.interruption || {};
   const ellm = remote?.ellm_model || {};
@@ -223,34 +226,46 @@ async function main() {
       null,
     promptPresent: Boolean(remotePromptText),
     promptRules: {
-      contextToolInstruction: /airadesk_get_call_context/i.test(remotePromptText),
-      collectionGoalInstruction: /collectionGoal/i.test(remotePromptText),
-      privateNoteInstruction: /extraNotes|private note/i.test(remotePromptText),
-      nonDeceptionInstruction: /never claim to be human|impersonate/i.test(remotePromptText),
-      truthfulAiAnswerInstruction: /AI-powered virtual calling assistant/i.test(
-        remotePromptText,
-      ),
-      companyPurposeOpeningInstruction: /outbound.*company name.*reason/i.test(
-        remotePromptText,
-      ),
-      leadCaptureInstruction: /airadesk_capture_lead_details/i.test(remotePromptText),
-      meetingToolInstruction: /airadesk_schedule_meeting/i.test(remotePromptText),
-      optOutInstruction: /opt-?out|not to contact/i.test(remotePromptText),
-      hangupInstruction: /hang_up/i.test(remotePromptText),
-      currentDateVariable: /\{\{now\}\}/.test(remotePromptText),
-      defaultTimezoneRule: /Asia\/Kolkata/i.test(remotePromptText),
-      relativeDateRule: /tomorrow/i.test(remotePromptText),
-      exactConfirmationRule: /confirm the exact calendar date/i.test(remotePromptText),
-      voicePaceInstruction: /VOICE AND RESPONSE STYLE|brisk, natural professional pace/i.test(
-        remotePromptText,
-      ),
-      shortResponseInstruction: /25 spoken words/i.test(remotePromptText),
-      oneQuestionInstruction: /one question at a time/i.test(remotePromptText),
-      toolFailureRecoveryInstruction:
-        /Never remain silent indefinitely waiting for an internal tool/i.test(
+      under7000Chars: remotePromptText.length < 7000,
+      hasNowVariable: /\{\{now\}\}/.test(remotePromptText),
+      hasContextTool: /airadesk_get_call_context/.test(remotePromptText),
+      hasLeadCaptureTool: /airadesk_capture_lead_details/.test(remotePromptText),
+      hasScheduleTool: /airadesk_schedule_meeting/.test(remotePromptText),
+      hasHumanHandoffTool: /airadesk_request_human_handoff/.test(remotePromptText),
+      hasCowdOpening:
+        /Hi, this is Kora from Cowd\. We build software solutions and websites for businesses\./.test(
           remotePromptText,
         ),
-      silenceRecoveryInstruction: /Hello, are you there\?/i.test(remotePromptText),
+      forbidsHowCanIHelpYou: /Do not ask “How can I help you\?”/.test(remotePromptText),
+      hasDiscoveryLimit: /Ask no more than two or three discovery questions\./.test(
+        remotePromptText,
+      ),
+      requiresExactDateTimeTimezone:
+        /Use airadesk_schedule_meeting only when exact date, time, and timezone are known\./.test(
+          remotePromptText,
+        ),
+      requiresToolSuccessForScheduling:
+        /A meeting is scheduled only when the tool returns success: true\./.test(
+          remotePromptText,
+        ),
+      hasSuccessfulMeetingClosing:
+        /Perfect\. Our team will reach out to you at the confirmed time\. Thank you, and have a great day\./.test(
+          remotePromptText,
+        ),
+      requiresHangupAfterSuccess: /Then use hang_up\./.test(remotePromptText),
+      forbidsAnythingElseQuestion:
+        /Do not ask “Is there anything else I can help you with\?”/.test(remotePromptText),
+      respectsOptOut:
+        /If asked not to contact again, acknowledge, stop the sales conversation, and end the call\./.test(
+          remotePromptText,
+        ),
+      hasNoCursorInstructions: !/Cursor|BEGIN APPROVED PROMPT|END APPROVED PROMPT/.test(
+        remotePromptText,
+      ),
+      hasNoSecretTokens:
+        !/HUME_API_KEY|TWILIO_AUTH_TOKEN|WEBHOOK_SIGNING_KEY|sk-[A-Za-z0-9]/.test(
+          remotePromptText,
+        ),
     },
     latencySettings: {
       end_of_turn_silence_ms: turnDetection.end_of_turn_silence_ms ?? null,

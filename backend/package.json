@@ -28,8 +28,12 @@
     "db:backfill-hume-metadata": "tsx scripts/backfillHumeMetadata.ts",
     "dev:verify-scheduled-call-context": "tsx scripts/verifyScheduledCallContext.ts",
     "calls:reconcile": "tsx scripts/reconcileCallLifecycle.ts",
+    "inbound:reconcile-calls": "tsx scripts/reconcileInboundCalls.ts",
     "hume:reconcile-chat-history": "tsx scripts/reconcileHumeChatHistory.ts",
-    "meetings:reconcile-hume": "tsx scripts/reconcileHumeMeetings.ts"
+    "meetings:reconcile-hume": "tsx scripts/reconcileHumeMeetings.ts",
+    "calls:audit-isolation": "tsx scripts/auditCallIsolation.ts",
+    "calls:reconcile-termination": "tsx scripts/reconcileTerminationIntents.ts",
+    "voice:register-inbound-endpoint": "tsx scripts/registerInboundVoiceEndpoint.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",

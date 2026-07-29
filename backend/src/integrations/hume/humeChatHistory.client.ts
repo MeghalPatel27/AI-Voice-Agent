@@ -12,6 +12,8 @@ export type HumeChatSummary = {
   endTimestampMs: number | null;
   eventCount: number | null;
   twilioCallSid: string | null;
+  twilioFromNumber?: string | null;
+  twilioToNumber?: string | null;
   direction: string | null;
   requestId: string | null;
 };
@@ -35,14 +37,30 @@ function parseTwilioMetadata(raw: unknown): {
   callSid: string | null;
   direction: string | null;
   configId: string | null;
+  fromNumber: string | null;
+  toNumber: string | null;
 } {
-  if (!raw) return { callSid: null, direction: null, configId: null };
+  if (!raw) {
+    return {
+      callSid: null,
+      direction: null,
+      configId: null,
+      fromNumber: null,
+      toNumber: null,
+    };
+  }
   let value: Record<string, unknown> = {};
   if (typeof raw === "string") {
     try {
       value = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      return { callSid: null, direction: null, configId: null };
+      return {
+        callSid: null,
+        direction: null,
+        configId: null,
+        fromNumber: null,
+        toNumber: null,
+      };
     }
   } else if (typeof raw === "object") {
     value = raw as Record<string, unknown>;
@@ -54,7 +72,10 @@ function parseTwilioMetadata(raw: unknown): {
   const callSid = String(twilio.call_sid || twilio.CallSid || "").trim() || null;
   const direction = String(twilio.direction || "").trim() || null;
   const configId = String(twilio.config_id || value.config_id || "").trim() || null;
-  return { callSid, direction, configId };
+  const fromNumber =
+    String(twilio.from_number || twilio.From || "").trim() || null;
+  const toNumber = String(twilio.to_number || twilio.To || "").trim() || null;
+  return { callSid, direction, configId, fromNumber, toNumber };
 }
 
 function normalizeChatSummary(raw: Record<string, unknown>): HumeChatSummary {
@@ -72,6 +93,8 @@ function normalizeChatSummary(raw: Record<string, unknown>): HumeChatSummary {
     endTimestampMs: Number(raw.end_timestamp) || null,
     eventCount: Number(raw.event_count) || null,
     twilioCallSid: twilio.callSid,
+    twilioFromNumber: twilio.fromNumber,
+    twilioToNumber: twilio.toNumber,
     direction: twilio.direction,
     requestId: String(raw.request_id || "").trim() || null,
   };

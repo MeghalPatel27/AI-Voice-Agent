@@ -77,3 +77,10 @@ Behavior:
 4. Check booking for call and tool marker.
 5. If deterministic and unambiguous, run meeting reconciliation apply.
 6. If ambiguous or past-time resolution, keep unresolved and request manual review.
+
+## Post-success call closure contract
+
+- Successful `airadesk_schedule_meeting` is a terminal business outcome for short qualification calls.
+- Tool response now includes termination hints: `conversationComplete: true`, `nextAction: "close_and_hang_up"`, `mustHangUp: true`.
+- Clarification responses keep the call open and never include hang-up flags.
+- Failure responses remain truthful and must not claim meeting success.

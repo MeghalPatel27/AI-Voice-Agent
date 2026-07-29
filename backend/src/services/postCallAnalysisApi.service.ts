@@ -10,6 +10,14 @@ export function withPostCallAnalysis<T extends { id: string; postAnalysis?: any 
   };
 }
 
+export function pickCallAnalysis(
+  call: { id: string; postAnalysis?: any } | null | undefined,
+) {
+  return serializePostCallAnalysis(call?.postAnalysis || null, {
+    isLatestCallAnalysis: false,
+  });
+}
+
 export function pickLatestCompletedCallAnalysis(
   calls: Array<{ id: string; createdAt?: Date; postAnalysis?: any }>,
 ) {

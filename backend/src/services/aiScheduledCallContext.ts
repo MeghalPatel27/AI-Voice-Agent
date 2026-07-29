@@ -32,6 +32,7 @@ const scheduledCallContextSchema = z.object({
   customerId: z.string().nullable().optional(),
   createdBy: z.string().nullable().optional(),
   conversationId: z.string().nullable().optional(),
+  callId: z.string().nullable().optional(),
   callSid: z.string().nullable().optional(),
   startedAt: z.string().datetime().nullable().optional(),
   completedAt: z.string().datetime().nullable().optional(),

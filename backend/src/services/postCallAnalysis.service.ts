@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { prisma } from "../db/prisma";
+import {
+  buildLabeledTranscriptLines,
+  loadCallScopedMessages,
+} from "./callTranscript.service";
 
 export const POST_CALL_PROMPT_VERSION = "post-call-intent-v1";
 
@@ -377,15 +381,6 @@ export async function loadCallTranscriptForAnalysis(callId: string) {
         select: {
           id: true,
           companyId: true,
-          messages: {
-            orderBy: { createdAt: "asc" },
-            take: 300,
-            select: {
-              senderType: true,
-              body: true,
-              createdAt: true,
-            },
-          },
         },
       },
     },
@@ -393,7 +388,12 @@ export async function loadCallTranscriptForAnalysis(callId: string) {
 
   if (!call) return null;
 
-  const fromMessages = buildLabeledTranscript(call.conversation.messages);
+  const scopedMessages = await loadCallScopedMessages(
+    call.id,
+    call.conversationId,
+  );
+
+  let fromMessages = buildLabeledTranscript(scopedMessages);
 
   if (
     !fromMessages.hasMeaningfulCustomerContent &&
@@ -432,10 +432,27 @@ export async function loadCallTranscriptForAnalysis(callId: string) {
       );
 
     if (synthetic.length > 0) {
-      return {
-        call,
-        built: buildLabeledTranscript(synthetic),
-      };
+      fromMessages = buildLabeledTranscript(synthetic);
+    }
+  }
+
+  if (
+    !fromMessages.hasMeaningfulCustomerContent &&
+    call.transcript?.trim()
+  ) {
+    const labeled = buildLabeledTranscriptLines(
+      call.transcript.split("\n").map((line) => ({
+        senderType: /^CUSTOMER:|^Caller:/i.test(line) ? "CUSTOMER" : "AI",
+        body: line.replace(/^(CUSTOMER|Caller|AI|Assistant):\s*/i, ""),
+      })),
+    );
+    if (labeled.trim()) {
+      fromMessages = buildLabeledTranscript(
+        call.transcript.split("\n").map((line) => ({
+          senderType: /^CUSTOMER:|^Caller:/i.test(line) ? "CUSTOMER" : "AI",
+          body: line.replace(/^(CUSTOMER|Caller|AI|Assistant):\s*/i, ""),
+        })),
+      );
     }
   }
 

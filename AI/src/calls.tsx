@@ -1057,10 +1057,7 @@ function CallRecord({
 }) {
   const customerName = conversation.customer?.fullName || "Unknown customer";
   const recordingUrl = getRecordingUrl(call);
-  const analysis =
-    call?.postCallAnalysis ||
-    conversation.latestCallAnalysis ||
-    null;
+  const analysis = call?.postCallAnalysis || null;
 
   const callObjective =
     call?.callObjective ||
@@ -1072,15 +1069,10 @@ function CallRecord({
     "";
 
   const aiSummaryText =
-    (call?.summary &&
+    call?.summary &&
     normalizeText(call.summary) !== normalizeText(callObjective)
       ? call.summary
-      : "") ||
-    (conversation.aiSummary &&
-    normalizeText(conversation.aiSummary) !== normalizeText(callObjective) &&
-    !/scheduled ai call/i.test(conversation.aiSummary)
-      ? conversation.aiSummary
-      : "");
+      : analysis?.requirementSummary || "";
   const recordingUiState = resolveRecordingUiState(call);
   const analysisView = toPostCallAnalysisView(analysis);
 
@@ -2380,20 +2372,15 @@ function getMeetingStatusConfig(status?: string | null) {
 }
 
 function extractRequirementChips(
-  conversation: CallConversation | null,
+  _conversation: CallConversation | null,
   call: Call | null,
 ): string[] {
-  if (!conversation) return [];
+  if (!call) return [];
 
-  const analysis = call?.postCallAnalysis || conversation.latestCallAnalysis;
+  const analysis = call.postCallAnalysis;
   const values: string[] = [];
 
   values.push(...(analysis?.requirementDetails?.desiredCapabilities || []));
-  values.push(...(conversation.leadRequirements?.raw || []));
-
-  for (const task of conversation.tasks || []) {
-    values.push(...(task.leadRequirements?.raw || []));
-  }
 
   if (analysis?.requirementDetails?.primaryNeed) {
     values.push(analysis.requirementDetails.primaryNeed);
@@ -2405,21 +2392,21 @@ function extractRequirementChips(
 }
 
 function getRequirementSummary(
-  conversation: CallConversation | null,
+  _conversation: CallConversation | null,
   call: Call | null,
 ): string {
-  if (!conversation) return "";
+  if (!call) return "";
 
-  const analysis = call?.postCallAnalysis || conversation.latestCallAnalysis;
+  const analysis = call.postCallAnalysis;
   const objective =
-    call?.callObjective ||
-    call?.collectionGoal ||
-    call?.purpose ||
-    (typeof call?.metadata?.collectionGoal === "string"
+    call.callObjective ||
+    call.collectionGoal ||
+    call.purpose ||
+    (typeof call.metadata?.collectionGoal === "string"
       ? call.metadata.collectionGoal
       : "");
 
-  if (call?.capturedRequirementSummary) {
+  if (call.capturedRequirementSummary) {
     return call.capturedRequirementSummary;
   }
 
@@ -2428,39 +2415,17 @@ function getRequirementSummary(
     return "";
   }
 
-  return (
-    summary ||
-    conversation.leadRequirements?.summary ||
-    ""
-  );
+  return summary;
 }
 
 function buildConversationTranscript(
-  conversation: CallConversation | null,
+  _conversation: CallConversation | null,
   call: Call | null,
 ): string {
-  if (!conversation) return "";
+  if (!call) return "";
 
-  const direct =
-    call?.transcript ||
-    call?.computedTranscript ||
-    conversation.computedTranscript ||
-    "";
-
-  if (direct.trim()) return direct.trim();
-
-  return (conversation.messages || [])
-    .map((message) => {
-      const speaker =
-        message.senderType === "CUSTOMER"
-          ? "Customer"
-          : message.senderType === "AI"
-            ? "AI"
-            : "Human";
-      return `${speaker}: ${message.body}`;
-    })
-    .join("\n\n")
-    .trim();
+  const direct = call.transcript || call.computedTranscript || "";
+  return direct.trim();
 }
 
 function getRecordingUrl(call: Call | null): string {

@@ -143,6 +143,7 @@ npm run hume:validate-config
 ```
 
 Dry-run/apply must report prompt metadata only (version/checksum change and preservation checks), without printing secrets or tenant private data.
+If dry-run shows unrelated config drift (voice, model, tools, webhook, latency settings, or retention metadata), block apply and resolve the drift first.
 
 ## Config vs Prompt Version Fields
 
@@ -162,12 +163,16 @@ Do not describe `humePromptRemoteVersion` or `localCanonicalPromptVersion` as "c
 ## Canonical Prompt Source
 
 - Source of truth: `backend/src/integrations/hume/humeSystemPrompt.ts`
+- Active version: `2026-07-29.8`
+- Character count (normalized): `6886` (must remain `< 7000`)
+- UTF-8 byte count (normalized): `6968`
+- SHA-256 checksum (canonical normalization): `18ca864f451f8fa3e3fe4eb3dc1c40ca3ff3de7c6f89ba94c8fef7b7b7d89bbd`
 - Exports:
   - `HUME_SYSTEM_PROMPT_TEXT`
   - `HUME_SYSTEM_PROMPT_VERSION`
   - `HUME_SYSTEM_PROMPT_CHECKSUM`
   - `HUME_SYSTEM_PROMPT_CHAR_COUNT`
-- Hard fail when prompt exceeds 7,000 characters.
+- Hard fail when prompt reaches or exceeds 7,000 characters.
 - Target: under 6,500 characters. Current concise prompt starts with **VOICE AND RESPONSE STYLE** (brisk pace, ~25 spoken words, one question per turn).
 - The prompt is global behavior only. Company details and call objectives are injected dynamically via `airadesk_get_call_context`.
 - Do not hardcode tenant company names or customer data in this global prompt.
@@ -227,6 +232,16 @@ The validator reports `dataRetention: USER_CONFIRMED_ON` when this operational f
 
 ## Built-in hang_up
 - Enable Hume built-in `hang_up` tool in the same EVI configuration.
+- After scheduling success, prompt policy must enforce one brief closing then immediate `hang_up` (no extra question / no wait for goodbye).
+
+## Post-meeting fallback guardrails
+
+- Prompt-only hang-up is not a sufficient production guarantee.
+- Backend fallback watchdog (`callTermination.service.ts`) enforces bounded exact-call closure using the exact Twilio Call SID when Hume does not end the call in time.
+- Recommended defaults:
+  - `POST_MEETING_HANGUP_GRACE_MS=10000`
+  - `POST_MEETING_HANGUP_MAX_ATTEMPTS=2`
+  - `POST_MEETING_HANGUP_RETRY_MS=2000`
 
 ## Twilio Configuration
 - Inbound number voice webhook must be:
