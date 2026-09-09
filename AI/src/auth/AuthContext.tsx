@@ -4,11 +4,11 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
-import { apiFetch, registerSessionInvalidationListener } from "../lib/api";
+
+import { apiFetch } from "../lib/api";
 
 export type Industry =
   | "HOSPITAL"
@@ -28,17 +28,10 @@ export type AuthUser = {
   industry: Industry;
 };
 
-export type AuthStatus = "HYDRATING" | "AUTHENTICATED" | "UNAUTHENTICATED";
-
-type LoginResponse = {
-  message: string;
-  token: string;
-  user: AuthUser;
-};
-
-type MeResponse = {
-  user: AuthUser;
-};
+export type AuthStatus =
+  | "HYDRATING"
+  | "AUTHENTICATED"
+  | "UNAUTHENTICATED";
 
 type RegisterPayload = {
   name: string;
@@ -48,10 +41,16 @@ type RegisterPayload = {
   industry: Industry;
 };
 
+type MeResponse = {
+  user: AuthUser;
+};
+
 type AuthContextValue = {
   user: AuthUser | null;
   status: AuthStatus;
   loading: boolean;
+
+  // Kept for compatibility with old components.
   login: (email: string, password: string) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -60,125 +59,67 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function readStoredToken() {
-  return localStorage.getItem("airadesk_token");
-}
+export function AuthProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const [user, setUser] =
+    useState<AuthUser | null>(null);
 
-function getInitialStatus(): AuthStatus {
-  return readStoredToken() ? "HYDRATING" : "UNAUTHENTICATED";
-}
-
-async function fetchSessionUser(signal?: AbortSignal) {
-  const data = await apiFetch<MeResponse>("/api/auth/me", { signal });
-  return data.user;
-}
-
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [status, setStatus] = useState<AuthStatus>(getInitialStatus);
-  const hydrationAbortRef = useRef<AbortController | null>(null);
-  const redirectingRef = useRef(false);
+  const [status, setStatus] =
+    useState<AuthStatus>("HYDRATING");
 
   const loading = status === "HYDRATING";
 
-  const clearSession = useCallback(() => {
+  const refreshUser = useCallback(async () => {
+    // Remove any old JWT left over from the previous login system.
     localStorage.removeItem("airadesk_token");
-    setUser(null);
-    setStatus("UNAUTHENTICATED");
+
+    setStatus("HYDRATING");
+
+    try {
+      const data = await apiFetch<MeResponse>(
+        "/api/auth/me"
+      );
+
+      setUser(data.user);
+      setStatus("AUTHENTICATED");
+    } catch (error) {
+      console.error(
+        "Failed to load local development user:",
+        error
+      );
+
+      setUser(null);
+      setStatus("UNAUTHENTICATED");
+    }
   }, []);
 
-  const hydrateFromToken = useCallback(
-    async (signal?: AbortSignal) => {
-      const token = readStoredToken();
-      if (!token) {
-        setUser(null);
-        setStatus("UNAUTHENTICATED");
-        return;
-      }
+  useEffect(() => {
+    void refreshUser();
+  }, [refreshUser]);
 
-      setStatus("HYDRATING");
-
-      try {
-        const nextUser = await fetchSessionUser(signal);
-        if (signal?.aborted) return;
-        setUser(nextUser);
-        setStatus("AUTHENTICATED");
-      } catch (error) {
-        if (signal?.aborted) return;
-        const aborted =
-          error instanceof Error &&
-          "aborted" in error &&
-          Boolean((error as { aborted?: boolean }).aborted);
-        if (aborted) return;
-        clearSession();
-      }
+  // Login/register are intentionally bypassed locally.
+  // These functions stay here so old components still compile.
+  const login = useCallback(
+    async (_email: string, _password: string) => {
+      await refreshUser();
     },
-    [clearSession],
+    [refreshUser]
   );
 
-  useEffect(() => {
-    hydrationAbortRef.current?.abort();
-    const controller = new AbortController();
-    hydrationAbortRef.current = controller;
+  const register = useCallback(
+    async (_payload: RegisterPayload) => {
+      await refreshUser();
+    },
+    [refreshUser]
+  );
 
-    // Hydrate persisted sessions once on mount.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- auth bootstrap must read persisted token after mount
-    void hydrateFromToken(controller.signal);
-
-    return () => {
-      controller.abort();
-    };
-  }, [hydrateFromToken]);
-
-  useEffect(() => {
-    registerSessionInvalidationListener((reason) => {
-      if (reason !== "unauthorized" || redirectingRef.current) return;
-      redirectingRef.current = true;
-      clearSession();
-    });
-
-    return () => {
-      registerSessionInvalidationListener(null);
-      redirectingRef.current = false;
-    };
-  }, [clearSession]);
-
-  const refreshUser = useCallback(async () => {
-    await hydrateFromToken();
-  }, [hydrateFromToken]);
-
-  const login = useCallback(async (email: string, password: string) => {
-    const data = await apiFetch<LoginResponse>("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        password,
-      }),
-    });
-
-    localStorage.setItem("airadesk_token", data.token);
-    redirectingRef.current = false;
-    setUser(data.user);
-    setStatus("AUTHENTICATED");
-  }, []);
-
-  const register = useCallback(async (payload: RegisterPayload) => {
-    const data = await apiFetch<LoginResponse>("/api/auth/register", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-
-    localStorage.setItem("airadesk_token", data.token);
-    redirectingRef.current = false;
-    setUser(data.user);
-    setStatus("AUTHENTICATED");
-  }, []);
-
+  // There is no logout in local single-user mode.
   const logout = useCallback(() => {
-    hydrationAbortRef.current?.abort();
-    redirectingRef.current = false;
-    clearSession();
-  }, [clearSession]);
+    void refreshUser();
+  }, [refreshUser]);
 
   const value = useMemo(
     () => ({
@@ -187,21 +128,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       login,
       register,
-      logout,
       refreshUser,
+      logout,
     }),
-    [user, status, loading, login, register, logout, refreshUser],
+    [
+      user,
+      status,
+      loading,
+      login,
+      register,
+      refreshUser,
+      logout,
+    ]
   );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
-// eslint-disable-next-line react-refresh/only-export-components -- hook must live beside AuthProvider
 export function useAuth() {
   const context = useContext(AuthContext);
 
   if (!context) {
-    throw new Error("useAuth must be used inside AuthProvider");
+    throw new Error(
+      "useAuth must be used inside AuthProvider"
+    );
   }
 
   return context;
